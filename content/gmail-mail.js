@@ -206,10 +206,22 @@ function extractVerificationCode(text) {
   const matchEn = text.match(/code[:\s]+is[:\s]+(\d{6})|code[:\s]+(\d{6})/i);
   if (matchEn) return matchEn[1] || matchEn[2];
 
-  const match6 = text.match(/\b(\d{6})\b/);
-  if (match6) return match6[1];
-
   return null;
+}
+
+function isLikelyUnreadMailRow(row, meta) {
+  if (!row) return false;
+
+  // Gmail unread row marker
+  if (row.classList.contains('zE')) return true;
+
+  const classText = String(row.className || '').toLowerCase();
+  if (/unread|new|unseen|未读/.test(classText)) return true;
+
+  const aria = String(meta?.ariaLabel || row.getAttribute('aria-label') || '').toLowerCase();
+  if (/未读|unread|new message/.test(aria)) return true;
+
+  return false;
 }
 
 function rowMatchesFilters(meta, senderFilters, subjectFilters) {
@@ -235,7 +247,15 @@ async function handlePollEmail(step, payload) {
   const existingMailIds = getCurrentMailIds();
   log(`Step ${step}: Snapshotted ${existingMailIds.size} visible emails as "old"`);
 
-  const FALLBACK_AFTER = 3;
+  // Keep a longer new-mail-only phase; fallback only near the end.
+  // This reduces stale-code risk when new mail arrives with delay.
+  const safeMaxAttempts = Math.max(1, Number(maxAttempts) || 1);
+  const longWaitTarget = safeMaxAttempts >= 12
+    ? Math.max(10, Math.floor(safeMaxAttempts * 0.6))
+    : Math.max(3, Math.floor(safeMaxAttempts * 0.6));
+  const FALLBACK_AFTER = safeMaxAttempts > 2
+    ? Math.min(longWaitTarget, safeMaxAttempts - 2)
+    : safeMaxAttempts;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     log(`Polling Gmail... attempt ${attempt}/${maxAttempts}`);
@@ -254,15 +274,21 @@ async function handlePollEmail(step, payload) {
     for (const row of orderedRows) {
       const mailId = getMailIdFromRow(row);
       if (!mailId) continue;
-      if (!useFallback && existingMailIds.has(mailId)) continue;
+
+      const isOldMail = existingMailIds.has(mailId);
+      if (!useFallback && isOldMail) continue;
 
       const meta = extractMailMeta(row);
       if (!rowMatchesFilters(meta, senderFilters, subjectFilters)) continue;
 
-      const code = extractVerificationCode(`${meta.subject} ${meta.digest} ${meta.ariaLabel}`);
+      // Prefer visible snippet text to avoid hidden aria text introducing stale numbers.
+      const code = extractVerificationCode(`${meta.subject} ${meta.digest}`);
       if (!code) continue;
 
-      const source = useFallback && existingMailIds.has(mailId) ? 'fallback-first-match' : 'new';
+      // In fallback mode, only accept old mails that still look unread.
+      if (useFallback && isOldMail && !isLikelyUnreadMailRow(row, meta)) continue;
+
+      const source = useFallback && isOldMail ? 'fallback-unread-old' : 'new';
       try {
         await deleteGmailItem(row, mailId);
         log(`Step ${step}: Deleted Gmail item ${mailId} after extracting code`, 'ok');
@@ -275,7 +301,7 @@ async function handlePollEmail(step, payload) {
     }
 
     if (attempt === FALLBACK_AFTER + 1) {
-      log(`Step ${step}: No new Gmail emails after ${FALLBACK_AFTER} attempts, falling back to first matching email`, 'warn');
+      log(`Step ${step}: No new Gmail emails after ${FALLBACK_AFTER} attempts, fallback enabled (old mails must look unread)`, 'warn');
     }
 
     if (attempt < maxAttempts) {

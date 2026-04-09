@@ -126,9 +126,15 @@ async function handlePollEmail(step, payload) {
   const existingMailIds = getCurrentMailIds();
   log(`Step ${step}: Snapshotted ${existingMailIds.size} existing emails as "old"`);
 
-  // Fallback after just 3 attempts (~10s). In practice, the email is usually
-  // already in the list but has the same mailid (page was already open).
-  const FALLBACK_AFTER = 3;
+  // Keep a longer "new-mail-only" window first, then fallback only near the end.
+  // This avoids selecting stale old/read emails before fresh verification mail arrives.
+  const safeMaxAttempts = Math.max(1, Number(maxAttempts) || 1);
+  const longWaitTarget = safeMaxAttempts >= 12
+    ? Math.max(10, Math.floor(safeMaxAttempts * 0.6))
+    : Math.max(3, Math.floor(safeMaxAttempts * 0.6));
+  const FALLBACK_AFTER = safeMaxAttempts > 2
+    ? Math.min(longWaitTarget, safeMaxAttempts - 2)
+    : safeMaxAttempts;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     log(`Polling QQ Mail... attempt ${attempt}/${maxAttempts}`);
@@ -147,7 +153,8 @@ async function handlePollEmail(step, payload) {
     for (const item of allItems) {
       const mailId = item.getAttribute('data-mailid');
 
-      if (!useFallback && existingMailIds.has(mailId)) continue;
+      const isOldMail = existingMailIds.has(mailId);
+      if (!useFallback && isOldMail) continue;
 
       const sender = (item.querySelector('.cmp-account-nick')?.textContent || '').toLowerCase();
       const subject = (item.querySelector('.mail-subject')?.textContent || '').toLowerCase();
@@ -159,7 +166,12 @@ async function handlePollEmail(step, payload) {
       if (senderMatch || subjectMatch) {
         const code = extractVerificationCode(subject + ' ' + digest);
         if (code) {
-          const source = useFallback && existingMailIds.has(mailId) ? 'fallback-first-match' : 'new';
+          // In fallback mode, only allow old mails that look unread to reduce stale-code risk.
+          if (useFallback && isOldMail && !isLikelyUnreadMailItem(item)) {
+            continue;
+          }
+
+          const source = useFallback && isOldMail ? 'fallback-unread-old' : 'new';
           try {
             await deleteMailItem(item, mailId);
             log(`Step ${step}: Deleted QQ Mail item ${mailId} after extracting code`, 'ok');
@@ -173,7 +185,7 @@ async function handlePollEmail(step, payload) {
     }
 
     if (attempt === FALLBACK_AFTER + 1) {
-      log(`Step ${step}: No new emails after ${FALLBACK_AFTER} attempts, falling back to first matching email`, 'warn');
+      log(`Step ${step}: No new emails after ${FALLBACK_AFTER} attempts, fallback enabled (old mails must look unread)`, 'warn');
     }
 
     if (attempt < maxAttempts) {
@@ -185,6 +197,25 @@ async function handlePollEmail(step, payload) {
     `No new matching email found after ${(maxAttempts * intervalMs / 1000).toFixed(0)}s. ` +
     'Check QQ Mail manually. Email may be delayed or in spam folder.'
   );
+}
+
+function isLikelyUnreadMailItem(item) {
+  if (!item) return false;
+
+  const classText = String(item.className || '').toLowerCase();
+  if (/unread|new|unseen|noread|未读/.test(classText)) return true;
+
+  const subjectEl = item.querySelector('.mail-subject');
+  if (subjectEl) {
+    const fw = Number(window.getComputedStyle(subjectEl).fontWeight || 0);
+    if (fw >= 600) return true;
+  }
+
+  if (item.querySelector('.mail-unread, .unread, .xmail-unread, [title*="未读"]')) {
+    return true;
+  }
+
+  return false;
 }
 
 // ============================================================

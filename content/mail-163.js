@@ -126,7 +126,15 @@ async function handlePollEmail(step, payload) {
   const existingMailIds = getCurrentMailIds();
   log(`Step ${step}: Snapshotted ${existingMailIds.size} existing emails`);
 
-  const FALLBACK_AFTER = 3;
+  // Keep a longer new-mail-only phase; fallback only near the end.
+  // This reduces grabbing stale old/read emails before the fresh code arrives.
+  const safeMaxAttempts = Math.max(1, Number(maxAttempts) || 1);
+  const longWaitTarget = safeMaxAttempts >= 12
+    ? Math.max(10, Math.floor(safeMaxAttempts * 0.6))
+    : Math.max(3, Math.floor(safeMaxAttempts * 0.6));
+  const FALLBACK_AFTER = safeMaxAttempts > 2
+    ? Math.min(longWaitTarget, safeMaxAttempts - 2)
+    : safeMaxAttempts;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     log(`Polling 163 Mail... attempt ${attempt}/${maxAttempts}`);
@@ -142,7 +150,8 @@ async function handlePollEmail(step, payload) {
     for (const item of allItems) {
       const id = item.getAttribute('id') || '';
 
-      if (!useFallback && existingMailIds.has(id)) continue;
+      const isOldMail = existingMailIds.has(id);
+      if (!useFallback && isOldMail) continue;
 
       const senderEl = item.querySelector('.nui-user');
       const sender = senderEl ? senderEl.textContent.toLowerCase() : '';
@@ -158,9 +167,14 @@ async function handlePollEmail(step, payload) {
       if (senderMatch || subjectMatch) {
         const code = extractVerificationCode(subject + ' ' + ariaLabel);
         if (code && !seenCodes.has(code)) {
+          // In fallback mode, only accept old mails that look unread.
+          if (useFallback && isOldMail && !isLikelyUnreadMailItem(item, ariaLabel)) {
+            continue;
+          }
+
           seenCodes.add(code);
           persistSeenCodes();
-          const source = useFallback && existingMailIds.has(id) ? 'fallback' : 'new';
+          const source = useFallback && isOldMail ? 'fallback-unread-old' : 'new';
           log(`Step ${step}: Code found: ${code} (${source}, subject: ${subject.slice(0, 40)})`, 'ok');
 
           // Delete this email via right-click menu, WAIT for it to finish before returning
@@ -176,7 +190,7 @@ async function handlePollEmail(step, payload) {
     }
 
     if (attempt === FALLBACK_AFTER + 1) {
-      log(`Step ${step}: No new emails after ${FALLBACK_AFTER} attempts, falling back to first match`, 'warn');
+      log(`Step ${step}: No new emails after ${FALLBACK_AFTER} attempts, fallback enabled (old mails must look unread)`, 'warn');
     }
 
     if (attempt < maxAttempts) {
@@ -188,6 +202,22 @@ async function handlePollEmail(step, payload) {
     `No new matching email found on 163 Mail after ${(maxAttempts * intervalMs / 1000).toFixed(0)}s. ` +
     'Check inbox manually.'
   );
+}
+
+function isLikelyUnreadMailItem(item, ariaLabel = '') {
+  if (!item) return false;
+
+  const classText = String(item.className || '').toLowerCase();
+  if (/unread|new|unseen|noread|未读/.test(classText)) return true;
+
+  const aria = String(ariaLabel || item.getAttribute('aria-label') || '').toLowerCase();
+  if (/未读|unread|新邮件/.test(aria)) return true;
+
+  if (item.querySelector('.unread, .nui-ico-unread, [title*="未读"]')) {
+    return true;
+  }
+
+  return false;
 }
 
 // ============================================================

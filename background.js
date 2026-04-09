@@ -51,9 +51,9 @@ const DEFAULT_STATE = {
   icloudHostPreference: 'auto',
   preferredIcloudHost: '',
   mailProvider: '163', // 'qq', '163', 'gmail', or 'inbucket'
-  mailPollMaxAttempts: 20,
+  mailPollMaxAttempts: 24,
   mailPollIntervalMs: 3000,
-  mailResendRounds: 3,
+  mailResendRounds: 2,
   inbucketHost: '',
   inbucketMailbox: '',
 };
@@ -836,9 +836,9 @@ async function resetState() {
     icloudHostPreference: prev.icloudHostPreference || 'auto',
     preferredIcloudHost: prev.preferredIcloudHost || '',
     mailProvider: prev.mailProvider || '163',
-    mailPollMaxAttempts: Number(prev.mailPollMaxAttempts) || 20,
+    mailPollMaxAttempts: Number(prev.mailPollMaxAttempts) || 24,
     mailPollIntervalMs: Number(prev.mailPollIntervalMs) || 3000,
-    mailResendRounds: Number(prev.mailResendRounds) || 3,
+    mailResendRounds: Number(prev.mailResendRounds) || 2,
     inbucketHost: prev.inbucketHost || '',
     inbucketMailbox: prev.inbucketMailbox || '',
   });
