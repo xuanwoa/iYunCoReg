@@ -24,6 +24,7 @@ const btnIcloudLoginDone = document.getElementById('btn-icloud-login-done');
 const btnIcloudRefresh = document.getElementById('btn-icloud-refresh');
 const btnIcloudDeleteUsed = document.getElementById('btn-icloud-delete-used');
 const checkboxAutoDeleteIcloud = document.getElementById('checkbox-auto-delete-icloud');
+const checkboxForceRefreshOAuthBeforeStep6 = document.getElementById('checkbox-force-refresh-oauth-before-step6');
 const inputIcloudSearch = document.getElementById('input-icloud-search');
 const selectIcloudFilter = document.getElementById('select-icloud-filter');
 const checkboxIcloudSelectAll = document.getElementById('checkbox-icloud-select-all');
@@ -99,11 +100,12 @@ const I18N = {
     titleTheme: '切换主题',
     titleSkipStep: '跳过这一步',
     titleClearLog: '清空日志',
-    labelCpaAuth: 'CPA Auth',
+    labelCpaAuth: 'Auth 面板',
     labelLanguage: '语言',
     labelAlias: '别名',
     labelCleanup: '清理',
     labelIcloudHost: 'iCloud',
+    labelStep6: '第 6 步',
     labelVerify: '验证',
     labelMailWait: '轮询',
     labelMailResend: '重发',
@@ -118,11 +120,12 @@ const I18N = {
     icloudHostCom: 'iCloud.com',
     icloudHostCn: 'iCloud.com.cn',
     cleanupAutoDelete: '成功使用后自动删除 iCloud 别名',
+    step6ForceRefresh: '每次执行第 6 步前强制重新获取 OAuth',
     mailProvider163: '163 邮箱 (mail.163.com)',
     mailProviderQq: 'QQ 邮箱 (wx.mail.qq.com)',
     mailProviderGmail: 'Gmail (mail.google.com)',
     mailProviderInbucket: 'Inbucket（自定义主机）',
-    placeholderCpaAuth: 'http://ip:port/management.html#/oauth',
+    placeholderCpaAuth: 'CPA: http://ip:port/management.html#/oauth 或 Sub2API: https://host/admin/accounts',
     placeholderInbucketHost: '你的 inbucket 主机或 https://你的主机',
     placeholderInbucketMailbox: '例如 zju2001',
     placeholderMailPollAttempts: '次数，例如 20',
@@ -166,7 +169,7 @@ const I18N = {
     step6: '通过 OAuth 登录',
     step7: '获取登录验证码',
     step8: 'OAuth 自动确认',
-    step9: 'CPA Auth 验证',
+    step9: 'Auth 面板验证',
     statusRunning: ({ step }) => `第 ${step} 步执行中...`,
     statusFailed: ({ step }) => `第 ${step} 步失败`,
     statusStopped: ({ step }) => `第 ${step} 步已停止`,
@@ -233,7 +236,7 @@ const I18N = {
     copiedValueFallback: ({ label }) => `已复制 ${label}`,
     copyFailed: ({ label, message }) => `${label}复制失败：${message}`,
     nothingToCopy: ({ label }) => `${label}为空，无法复制`,
-    pastedCpaAuth: '已从剪贴板粘贴 CPA Auth 地址',
+    pastedCpaAuth: '已从剪贴板粘贴 Auth 面板地址',
     pasteFailed: ({ message }) => `粘贴失败：${message}`,
     clipboardEmpty: '剪贴板为空',
     clipboardNoUsefulText: '剪贴板中没有可用内容',
@@ -250,11 +253,12 @@ const I18N = {
     titleTheme: 'Toggle theme',
     titleSkipStep: 'Skip this step',
     titleClearLog: 'Clear log',
-    labelCpaAuth: 'CPA Auth',
+    labelCpaAuth: 'Auth Panel',
     labelLanguage: 'Language',
     labelAlias: 'Alias',
     labelCleanup: 'Cleanup',
     labelIcloudHost: 'iCloud',
+    labelStep6: 'Step 6',
     labelVerify: 'Verify',
     labelMailWait: 'Poll',
     labelMailResend: 'Resend',
@@ -269,11 +273,12 @@ const I18N = {
     icloudHostCom: 'iCloud.com',
     icloudHostCn: 'iCloud.com.cn',
     cleanupAutoDelete: 'Delete iCloud alias after successful use',
+    step6ForceRefresh: 'Force refresh OAuth before every Step 6 run',
     mailProvider163: '163 Mail (mail.163.com)',
     mailProviderQq: 'QQ Mail (wx.mail.qq.com)',
     mailProviderGmail: 'Gmail (mail.google.com)',
     mailProviderInbucket: 'Inbucket (custom host)',
-    placeholderCpaAuth: 'http://ip:port/management.html#/oauth',
+    placeholderCpaAuth: 'CPA: http://ip:port/management.html#/oauth or Sub2API: https://host/admin/accounts',
     placeholderInbucketHost: 'your inbucket host or https://your-host',
     placeholderInbucketMailbox: 'e.g. zju2001',
     placeholderMailPollAttempts: 'Attempts, e.g. 20',
@@ -317,7 +322,7 @@ const I18N = {
     step6: 'Login via OAuth',
     step7: 'Get Login Code',
     step8: 'OAuth Auto Confirm',
-    step9: 'CPA Auth Verify',
+    step9: 'Auth Panel Verify',
     statusRunning: ({ step }) => `Step ${step} running...`,
     statusFailed: ({ step }) => `Step ${step} failed`,
     statusStopped: ({ step }) => `Step ${step} stopped`,
@@ -384,7 +389,7 @@ const I18N = {
     copiedValueFallback: ({ label }) => `${label} copied`,
     copyFailed: ({ label, message }) => `Failed to copy ${label}: ${message}`,
     nothingToCopy: ({ label }) => `${label} is empty`,
-    pastedCpaAuth: 'Pasted CPA Auth URL from clipboard',
+    pastedCpaAuth: 'Pasted Auth panel URL from clipboard',
     pasteFailed: ({ message }) => `Paste failed: ${message}`,
     clipboardEmpty: 'Clipboard is empty',
     clipboardNoUsefulText: 'Clipboard does not contain usable text',
@@ -555,6 +560,7 @@ async function restoreState() {
       inputVpsUrl.value = state.vpsUrl;
     }
     checkboxAutoDeleteIcloud.checked = Boolean(state.autoDeleteUsedIcloudAlias);
+    checkboxForceRefreshOAuthBeforeStep6.checked = Boolean(state.forceRefreshOAuthBeforeStep6);
     if (state.language) {
       selectLanguage.value = state.language;
     }
@@ -1484,6 +1490,14 @@ checkboxAutoDeleteIcloud.addEventListener('change', async () => {
     type: 'SAVE_SETTING',
     source: 'sidepanel',
     payload: { autoDeleteUsedIcloudAlias: checkboxAutoDeleteIcloud.checked },
+  });
+});
+
+checkboxForceRefreshOAuthBeforeStep6.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { forceRefreshOAuthBeforeStep6: checkboxForceRefreshOAuthBeforeStep6.checked },
   });
 });
 
