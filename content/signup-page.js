@@ -828,6 +828,7 @@ async function step5_fillNameBirthday(payload) {
     const isMainApp = location.host === 'chatgpt.com' && !document.querySelector('[data-testid="login-button"]');
     if (isMainApp) {
       log('Step 5: Name input not found, but we appear to be on the ChatGPT app/survey. Registration already completed!', 'ok');
+      reportComplete(5);
       return { skippedName: true };
     }
     throw new Error('Could not find name input. URL: ' + location.href);
