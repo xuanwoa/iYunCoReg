@@ -214,13 +214,7 @@ async function extractCodeFromOpenedMail(row, step, meta = {}) {
 }
 
 async function extractCodeFromMailRow(row, step, meta = {}) {
-  const inlineCode = extractVerificationCode(meta.combinedText || '');
-  if (inlineCode) {
-    return inlineCode;
-  }
-
-  log(`Step ${step}: Gmail row matched filters but list text had no code. Opening email body...`, 'info');
-  return await extractCodeFromOpenedMail(row, step, meta);
+  return extractVerificationCode(`${meta.subject} ${meta.digest}`) || null;
 }
 
 function triggerRowHover(row) {

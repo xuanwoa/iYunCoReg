@@ -345,13 +345,7 @@ async function extractCodeFromOpenedMail(item, step, meta = {}) {
 }
 
 async function extractCodeFromMailItem(item, step, meta = {}) {
-  const inlineCode = extractVerificationCode(meta.combinedText || '');
-  if (inlineCode) {
-    return inlineCode;
-  }
-
-  log(`Step ${step}: 163 item matched filters but list text had no code. Opening email body...`, 'info');
-  return await extractCodeFromOpenedMail(item, step, meta);
+  return extractVerificationCode(meta.combinedText || '');
 }
 
 // ============================================================
