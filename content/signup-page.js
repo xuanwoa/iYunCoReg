@@ -157,6 +157,23 @@ async function waitForSurfacePayload(payload = {}) {
       };
     }
 
+    // OpenAI sometimes drops the auth sequence entirely and forwards the user to the Chat UI or Survey.
+    const isMainAppLoggedin = location.host === 'chatgpt.com' && (
+      document.querySelector('textarea#prompt-textarea') || 
+      Array.from(document.querySelectorAll('button')).some(b => /跳过|skip/i.test(b.textContent)) ||
+      location.pathname.startsWith('/g/')
+    ) && !document.querySelector('[data-testid="login-button"]');
+
+    if (isMainAppLoggedin) {
+      log(`Step ${step}: Registration surface bypassed by OpenAI. Landed on ChatGPT main app or survey.`);
+      return {
+        selector: 'chatgpt-main-app',
+        readyState: document.readyState,
+        url: location.href,
+        minReadyState,
+      };
+    }
+
     const matchedError = findVerificationErrorMessage(errorPatterns);
     if (matchedError) {
       log(`Step ${step}: Verification error detected: ${matchedError}`, 'warn');
@@ -805,9 +822,14 @@ async function step5_fillNameBirthday(payload) {
   try {
     nameInput = await waitForElement(
       'input[name="name"], input[placeholder*="全名"], input[placeholder*="full name" i], input[autocomplete="name"]',
-      10000
+      8000
     );
   } catch {
+    const isMainApp = location.host === 'chatgpt.com' && !document.querySelector('[data-testid="login-button"]');
+    if (isMainApp) {
+      log('Step 5: Name input not found, but we appear to be on the ChatGPT app/survey. Registration already completed!', 'ok');
+      return { skippedName: true };
+    }
     throw new Error('Could not find name input. URL: ' + location.href);
   }
   await humanPause(500, 1300);
