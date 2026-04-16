@@ -296,8 +296,27 @@ async function setIcloudAliasUsedState(payload = {}) {
 
   const state = await getState();
   const manualAliasUsage = getManualAliasUsageMap(state);
-  manualAliasUsage[email] = Boolean(payload.used);
-  await setState({ manualAliasUsage });
+  const accounts = Array.isArray(state.accounts) ? [...state.accounts] : [];
+  
+  if (payload.used) {
+    manualAliasUsage[email] = true;
+    const existingIndex = accounts.findIndex(account => String(account?.email || '').trim() === email);
+    if (existingIndex < 0) {
+      accounts.push({
+        email,
+        password: state.customPassword || '',
+        createdAt: new Date().toISOString(),
+      });
+    }
+  } else {
+    manualAliasUsage[email] = false;
+    const existingIndex = accounts.findIndex(account => String(account?.email || '').trim() === email);
+    if (existingIndex >= 0) {
+      accounts.splice(existingIndex, 1);
+    }
+  }
+
+  await setState({ manualAliasUsage, accounts });
   await addLog(`iCloud: Marked ${email} as ${payload.used ? 'used' : 'unused'}`, 'ok');
   broadcastIcloudAliasesChanged({ reason: 'used-updated', email, used: Boolean(payload.used) });
   return { email, used: Boolean(payload.used) };
@@ -1038,18 +1057,7 @@ async function reuseOrCreateTab(source, url, options = {}) {
         if (registry[source]) registry[source].ready = false;
         await setState({ tabRegistry: registry });
         await chrome.tabs.reload(tabId);
-
-        await new Promise((resolve) => {
-          const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); resolve(); }, 30000);
-          const listener = (tid, info) => {
-            if (tid === tabId && info.status === 'complete') {
-              chrome.tabs.onUpdated.removeListener(listener);
-              clearTimeout(timer);
-              resolve();
-            }
-          };
-          chrome.tabs.onUpdated.addListener(listener);
-        });
+        await waitForTabComplete(tabId);
       }
 
       // For dynamically injected pages like the CPA Auth panel, re-inject immediately.
@@ -1084,18 +1092,8 @@ async function reuseOrCreateTab(source, url, options = {}) {
     await chrome.tabs.update(tabId, { url, active: true });
     console.log(LOG_PREFIX, `Reused tab ${source} (${tabId}), navigated to ${url.slice(0, 60)}`);
 
-    // Wait for page load complete (with 30s timeout)
-    await new Promise((resolve) => {
-      const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); resolve(); }, 30000);
-      const listener = (tid, info) => {
-        if (tid === tabId && info.status === 'complete') {
-          chrome.tabs.onUpdated.removeListener(listener);
-          clearTimeout(timer);
-          resolve();
-        }
-      };
-      chrome.tabs.onUpdated.addListener(listener);
-    });
+    // Wait for page load complete (with 15s timeout)
+    await waitForTabComplete(tabId);
 
     // If dynamic injection needed (CPA Auth panel), re-inject after navigation
     if (options.inject) {
@@ -1127,17 +1125,7 @@ async function reuseOrCreateTab(source, url, options = {}) {
 
   // If dynamic injection needed (CPA Auth panel), inject scripts after load
   if (options.inject) {
-    await new Promise((resolve) => {
-      const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); resolve(); }, 30000);
-      const listener = (tabId, info) => {
-        if (tabId === tab.id && info.status === 'complete') {
-          chrome.tabs.onUpdated.removeListener(listener);
-          clearTimeout(timer);
-          resolve();
-        }
-      };
-      chrome.tabs.onUpdated.addListener(listener);
-    });
+    await waitForTabComplete(tab.id);
     if (options.injectSource) {
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
@@ -1160,6 +1148,27 @@ async function reuseOrCreateTab(source, url, options = {}) {
 // ============================================================
 // Send command to content script (with readiness check)
 // ============================================================
+
+async function waitForTabComplete(tabId, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    let resolved = false;
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    const listener = (tid, info) => {
+      if (tid === tabId && info.status === 'complete') finish();
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId).then(tab => {
+      if (tab.status === 'complete') finish();
+    }).catch(finish);
+  });
+}
 
 async function sendToContentScript(source, message) {
   const registry = await getTabRegistry();
