@@ -66,8 +66,20 @@ function getCurrentMailIds() {
   return ids;
 }
 
+function normalizeText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function readAttr(el, name) {
+  try {
+    return el?.getAttribute?.(name) || '';
+  } catch {
+    return '';
+  }
+}
+
 function getRowText(row, selector) {
-  return (row.querySelector(selector)?.textContent || '').replace(/\s+/g, ' ').trim();
+  return normalizeText(row.querySelector(selector)?.textContent || '');
 }
 
 function extractMailMeta(row) {
@@ -76,16 +88,139 @@ function extractMailMeta(row) {
   const digest = getRowText(row, '.y2');
   const ariaLabelId = row.getAttribute('aria-labelledby');
   const ariaLabel = ariaLabelId
-    ? (document.getElementById(ariaLabelId)?.textContent || '').replace(/\s+/g, ' ').trim()
+    ? normalizeText(document.getElementById(ariaLabelId)?.textContent || '')
     : '';
+  const itemText = normalizeText(row.innerText || row.textContent || '');
+  const titleTexts = [];
+
+  const annotatedNodes = row.querySelectorAll('[title], [aria-label]');
+  for (const node of annotatedNodes) {
+    const title = normalizeText(readAttr(node, 'title'));
+    const label = normalizeText(readAttr(node, 'aria-label'));
+    if (title) titleTexts.push(title);
+    if (label) titleTexts.push(label);
+    if (titleTexts.length >= 20) break;
+  }
+
+  const combinedText = normalizeText([
+    sender,
+    subject,
+    digest,
+    ariaLabel,
+    itemText,
+    titleTexts.join(' '),
+  ].join(' '));
 
   return {
     sender,
     subject,
     digest,
     ariaLabel,
+    combinedText,
     unread: row.classList.contains('zE'),
   };
+}
+
+function scoreOpenedMailText(text, meta = {}) {
+  const normalized = normalizeText(text);
+  if (!normalized) return -1;
+
+  const lower = normalized.toLowerCase();
+  let score = 0;
+
+  if (extractVerificationCode(normalized)) score += 20;
+  if (/openai|chatgpt|verification|verify|login code|one-time|otp/i.test(normalized)) score += 12;
+  if (/验证码|代码|登录代码|临时|一次性/.test(normalized)) score += 12;
+
+  const sender = normalizeText(meta.sender).toLowerCase();
+  if (sender && lower.includes(sender)) score += 6;
+
+  const subjectTokens = normalizeText(meta.subject)
+    .toLowerCase()
+    .split(/[^a-z0-9\u4e00-\u9fff]+/i)
+    .filter(token => token.length >= 2);
+  for (const token of subjectTokens.slice(0, 8)) {
+    if (lower.includes(token)) score += 2;
+  }
+
+  return score;
+}
+
+function collectOpenedMailTextCandidates(meta = {}) {
+  const candidates = [];
+  const seen = new Set();
+
+  function pushCandidate(text, source) {
+    const normalized = normalizeText(text);
+    if (!normalized || normalized.length < 6) return;
+    const key = `${source}:${normalized.slice(0, 400)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push({
+      source,
+      text: normalized,
+      score: scoreOpenedMailText(normalized, meta),
+    });
+  }
+
+  document.querySelectorAll('.ii.gt .a3s.aiL, .a3s.aiL').forEach((el, index) => {
+    pushCandidate(el.innerText || el.textContent || '', `gmail-body-${index}`);
+  });
+
+  const detailSelectors = [
+    '.ii.gt .a3s.aiL',
+    '.a3s.aiL',
+    '.ii.gt',
+    '[role="listitem"] .ii.gt',
+    '[role="main"] .ii.gt',
+    '[role="document"]',
+  ];
+
+  document.querySelectorAll(detailSelectors.join(', ')).forEach((el, index) => {
+    pushCandidate(el.innerText || el.textContent || '', `detail-${index}`);
+  });
+
+  document.querySelectorAll('iframe').forEach((frame, index) => {
+    try {
+      const frameDoc = frame.contentDocument;
+      const frameBody = frameDoc?.body;
+      if (!frameBody) return;
+      pushCandidate(frameBody.innerText || frameBody.textContent || '', `iframe-${index}`);
+    } catch {}
+  });
+
+  return candidates.sort((a, b) => (b.score - a.score) || (b.text.length - a.text.length));
+}
+
+async function extractCodeFromOpenedMail(row, step, meta = {}) {
+  const clickTarget = row.querySelector('.bog, .y6, .zA .xS') || row;
+  simulateClick(clickTarget);
+  await sleep(500);
+
+  for (let attempt = 1; attempt <= 8; attempt++) {
+    throwIfStopped();
+    const candidates = collectOpenedMailTextCandidates(meta);
+    for (const candidate of candidates) {
+      const code = extractVerificationCode(candidate.text);
+      if (code) {
+        log(`Step ${step}: Code found from opened Gmail body (${candidate.source})`, 'ok');
+        return code;
+      }
+    }
+    await sleep(300);
+  }
+
+  return null;
+}
+
+async function extractCodeFromMailRow(row, step, meta = {}) {
+  const inlineCode = extractVerificationCode(meta.combinedText || '');
+  if (inlineCode) {
+    return inlineCode;
+  }
+
+  log(`Step ${step}: Gmail row matched filters but list text had no code. Opening email body...`, 'info');
+  return await extractCodeFromOpenedMail(row, step, meta);
 }
 
 function triggerRowHover(row) {
@@ -225,8 +360,8 @@ function isLikelyUnreadMailRow(row, meta) {
 }
 
 function rowMatchesFilters(meta, senderFilters, subjectFilters) {
-  const senderText = `${meta.sender} ${meta.ariaLabel}`.toLowerCase();
-  const subjectText = `${meta.subject} ${meta.digest} ${meta.ariaLabel}`.toLowerCase();
+  const senderText = `${meta.sender} ${meta.ariaLabel} ${meta.combinedText}`.toLowerCase();
+  const subjectText = `${meta.subject} ${meta.digest} ${meta.ariaLabel} ${meta.combinedText}`.toLowerCase();
   const senderMatch = senderFilters.some(filter => senderText.includes(String(filter || '').toLowerCase()));
   const subjectMatch = subjectFilters.some(filter => subjectText.includes(String(filter || '').toLowerCase()));
   return senderMatch || subjectMatch;
@@ -281,8 +416,7 @@ async function handlePollEmail(step, payload) {
       const meta = extractMailMeta(row);
       if (!rowMatchesFilters(meta, senderFilters, subjectFilters)) continue;
 
-      // Prefer visible snippet text to avoid hidden aria text introducing stale numbers.
-      const code = extractVerificationCode(`${meta.subject} ${meta.digest}`);
+      const code = await extractCodeFromMailRow(row, step, meta);
       if (!code) continue;
 
       // In fallback mode, only accept old mails that still look unread.

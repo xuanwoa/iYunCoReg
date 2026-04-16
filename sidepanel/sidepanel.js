@@ -25,6 +25,7 @@ const btnIcloudRefresh = document.getElementById('btn-icloud-refresh');
 const btnIcloudDeleteUsed = document.getElementById('btn-icloud-delete-used');
 const checkboxAutoDeleteIcloud = document.getElementById('checkbox-auto-delete-icloud');
 const checkboxForceRefreshOAuthBeforeStep6 = document.getElementById('checkbox-force-refresh-oauth-before-step6');
+const checkboxDebugFreeStepExecution = document.getElementById('checkbox-debug-free-step-execution');
 const inputIcloudSearch = document.getElementById('input-icloud-search');
 const selectIcloudFilter = document.getElementById('select-icloud-filter');
 const checkboxIcloudSelectAll = document.getElementById('checkbox-icloud-select-all');
@@ -53,6 +54,8 @@ const inputVpsUrl = document.getElementById('input-vps-url');
 const btnPasteVpsUrl = document.getElementById('btn-paste-vps-url');
 const selectIcloudHostPreference = document.getElementById('select-icloud-host-preference');
 const selectMailProvider = document.getElementById('select-mail-provider');
+const rowQqMailDomain = document.getElementById('row-qq-mail-domain');
+const selectQqMailDomain = document.getElementById('select-qq-mail-domain');
 const inputMailPollAttempts = document.getElementById('input-mail-poll-attempts');
 const inputMailPollInterval = document.getElementById('input-mail-poll-interval');
 const inputMailResendRounds = document.getElementById('input-mail-resend-rounds');
@@ -106,7 +109,9 @@ const I18N = {
     labelCleanup: '清理',
     labelIcloudHost: 'iCloud',
     labelStep6: '第 6 步',
+    labelDebug: '调试',
     labelVerify: '验证',
+    labelQqDomain: 'QQ 域名',
     labelMailWait: '轮询',
     labelMailResend: '重发',
     labelInbucket: 'Inbucket',
@@ -121,11 +126,14 @@ const I18N = {
     icloudHostCn: 'iCloud.com.cn',
     cleanupAutoDelete: '成功使用后自动删除 iCloud 别名',
     step6ForceRefresh: '每次执行第 6 步前强制重新获取 OAuth',
+    debugFreeStepExecution: '允许自由执行任意 Step',
     mailProvider163: '163 邮箱 (mail.163.com)',
-    mailProviderQq: 'QQ 邮箱 (wx.mail.qq.com)',
+    mailProviderQq: 'QQ 邮箱',
+    qqDomainStandard: '普通 (wx.mail.qq.com)',
+    qqDomainEnterprise: '企业 (exmail.qq.com)',
     mailProviderGmail: 'Gmail (mail.google.com)',
     mailProviderInbucket: 'Inbucket（自定义主机）',
-    placeholderCpaAuth: 'CPA: http://ip:port/management.html#/oauth 或 Sub2API: https://host/admin/accounts',
+    placeholderCpaAuth: '填写 Sub2API 或 CPA 链接',
     placeholderInbucketHost: '你的 inbucket 主机或 https://你的主机',
     placeholderInbucketMailbox: '例如 zju2001',
     placeholderMailPollAttempts: '次数，例如 20',
@@ -179,6 +187,7 @@ const I18N = {
     statusReady: '就绪',
     autoHintEmail: '使用 Auto 生成 iCloud 别名，或手动粘贴后继续',
     autoHintError: '自动运行被错误中断。修复问题或跳过失败步骤后继续',
+    invalidAuthUrlFormat: '链接格式错误，请填写 CPA 或 Sub2API 链接',
     fetchedEmail: ({ email }) => `已获取 ${email}`,
     autoFetchFailed: ({ message }) => `自动获取失败：${message}`,
     icloudSummaryInitial: '加载你的 Hide My Email 别名以便在这里管理。',
@@ -259,7 +268,9 @@ const I18N = {
     labelCleanup: 'Cleanup',
     labelIcloudHost: 'iCloud',
     labelStep6: 'Step 6',
+    labelDebug: 'Debug',
     labelVerify: 'Verify',
+    labelQqDomain: 'QQ Domain',
     labelMailWait: 'Poll',
     labelMailResend: 'Resend',
     labelInbucket: 'Inbucket',
@@ -274,11 +285,14 @@ const I18N = {
     icloudHostCn: 'iCloud.com.cn',
     cleanupAutoDelete: 'Delete iCloud alias after successful use',
     step6ForceRefresh: 'Force refresh OAuth before every Step 6 run',
+    debugFreeStepExecution: 'Allow free execution of any step',
     mailProvider163: '163 Mail (mail.163.com)',
-    mailProviderQq: 'QQ Mail (wx.mail.qq.com)',
+    mailProviderQq: 'QQ Mail',
+    qqDomainStandard: 'Standard (wx.mail.qq.com)',
+    qqDomainEnterprise: 'Enterprise (exmail.qq.com)',
     mailProviderGmail: 'Gmail (mail.google.com)',
     mailProviderInbucket: 'Inbucket (custom host)',
-    placeholderCpaAuth: 'CPA: http://ip:port/management.html#/oauth or Sub2API: https://host/admin/accounts',
+    placeholderCpaAuth: 'Enter a Sub2API or CPA URL',
     placeholderInbucketHost: 'your inbucket host or https://your-host',
     placeholderInbucketMailbox: 'e.g. zju2001',
     placeholderMailPollAttempts: 'Attempts, e.g. 20',
@@ -332,6 +346,7 @@ const I18N = {
     statusReady: 'Ready',
     autoHintEmail: 'Use Auto to generate an iCloud alias, or paste manually, then continue',
     autoHintError: 'Auto run was interrupted by an error. Fix it or skip the failed step, then continue',
+    invalidAuthUrlFormat: 'Invalid URL format. Enter a CPA or Sub2API URL.',
     fetchedEmail: ({ email }) => `Fetched ${email}`,
     autoFetchFailed: ({ message }) => `Auto fetch failed: ${message}`,
     icloudSummaryInitial: 'Load your Hide My Email aliases to manage them here.',
@@ -473,13 +488,62 @@ function applyLanguage(language) {
 
 async function saveVpsUrlValue(value) {
   const vpsUrl = String(value || '').trim();
-  inputVpsUrl.value = vpsUrl;
-  if (!vpsUrl) return;
+  const normalizedVpsUrl = normalizeAuthPanelUrl(vpsUrl);
+  if (!vpsUrl) {
+    inputVpsUrl.value = '';
+    await chrome.runtime.sendMessage({
+      type: 'SAVE_SETTING',
+      source: 'sidepanel',
+      payload: { vpsUrl: '' },
+    });
+    return true;
+  }
+
+  if (!normalizedVpsUrl) {
+    inputVpsUrl.value = '';
+    await chrome.runtime.sendMessage({
+      type: 'SAVE_SETTING',
+      source: 'sidepanel',
+      payload: { vpsUrl: '' },
+    });
+    showToast(t('invalidAuthUrlFormat'), 'error');
+    return false;
+  }
+
+  inputVpsUrl.value = normalizedVpsUrl;
   await chrome.runtime.sendMessage({
     type: 'SAVE_SETTING',
     source: 'sidepanel',
-    payload: { vpsUrl },
+    payload: { vpsUrl: normalizedVpsUrl },
   });
+  return true;
+}
+
+function normalizeAuthPanelUrl(value) {
+  const rawValue = String(value || '').trim();
+  if (!rawValue) return '';
+
+  let parsed;
+  try {
+    parsed = new URL(rawValue);
+  } catch {
+    return '';
+  }
+
+  const path = parsed.pathname.replace(/\/+$/, '');
+  const hash = parsed.hash || '';
+  const isSub2api = (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+    && path === '/admin/accounts'
+    && !hash;
+  const isCpa = (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+    && path === '/management.html'
+    && hash === '#/oauth';
+
+  if (!isSub2api && !isCpa) {
+    return '';
+  }
+
+  return parsed.toString();
 }
 
 async function copyTextValue(value, kind) {
@@ -508,8 +572,10 @@ async function pasteCpaAuthFromClipboard(options = {}) {
       showToast(t('clipboardEmpty'), 'warn');
       return;
     }
-    await saveVpsUrlValue(text);
-    showToast(t('pastedCpaAuth'), 'success', 2000);
+    const saved = await saveVpsUrlValue(text);
+    if (saved) {
+      showToast(t('pastedCpaAuth'), 'success', 2000);
+    }
   } catch (err) {
     showToast(t('pasteFailed', { message: err.message || err }), 'warn');
   }
@@ -561,6 +627,7 @@ async function restoreState() {
     }
     checkboxAutoDeleteIcloud.checked = Boolean(state.autoDeleteUsedIcloudAlias);
     checkboxForceRefreshOAuthBeforeStep6.checked = Boolean(state.forceRefreshOAuthBeforeStep6);
+    checkboxDebugFreeStepExecution.checked = Boolean(state.debugFreeStepExecution);
     if (state.language) {
       selectLanguage.value = state.language;
     }
@@ -568,6 +635,7 @@ async function restoreState() {
     if (state.mailProvider) {
       selectMailProvider.value = state.mailProvider;
     }
+    selectQqMailDomain.value = state.qqMailDomain || 'standard';
     inputMailPollAttempts.value = String(state.mailPollMaxAttempts || 20);
     inputMailPollInterval.value = String(Math.max(1, Math.round((state.mailPollIntervalMs || 3000) / 1000)));
     inputMailResendRounds.value = String(state.mailResendRounds || 3);
@@ -619,7 +687,9 @@ function syncPasswordField(state) {
 
 function updateMailProviderUI() {
   const useInbucket = selectMailProvider.value === 'inbucket';
+  const useQq = selectMailProvider.value === 'qq';
   rowMailProvider.style.display = '';
+  rowQqMailDomain.style.display = useQq ? '' : 'none';
   rowInbucketHost.style.display = useInbucket ? '' : 'none';
   rowInbucketMailbox.style.display = useInbucket ? '' : 'none';
 }
@@ -658,6 +728,7 @@ function updateProgressCounter() {
 }
 
 function updateButtonStates() {
+  const debugFreeStepExecution = Boolean(checkboxDebugFreeStepExecution?.checked);
   const statuses = {};
   document.querySelectorAll('.step-row').forEach(row => {
     const step = Number(row.dataset.step);
@@ -681,6 +752,8 @@ function updateButtonStates() {
     if (anyRunning) {
       btn.disabled = true;
       if (skipBtn) skipBtn.disabled = true;
+    } else if (debugFreeStepExecution) {
+      btn.disabled = false;
     } else if (step === 1) {
       btn.disabled = false;
     } else {
@@ -1462,10 +1535,7 @@ inputEmail.addEventListener('change', async () => {
 });
 
 inputVpsUrl.addEventListener('change', async () => {
-  const vpsUrl = inputVpsUrl.value.trim();
-  if (vpsUrl) {
-    await chrome.runtime.sendMessage({ type: 'SAVE_SETTING', source: 'sidepanel', payload: { vpsUrl } });
-  }
+  await saveVpsUrlValue(inputVpsUrl.value);
 });
 
 inputVpsUrl.addEventListener('click', async () => {
@@ -1501,6 +1571,15 @@ checkboxForceRefreshOAuthBeforeStep6.addEventListener('change', async () => {
   });
 });
 
+checkboxDebugFreeStepExecution.addEventListener('change', async () => {
+  updateButtonStates();
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { debugFreeStepExecution: checkboxDebugFreeStepExecution.checked },
+  });
+});
+
 selectIcloudHostPreference.addEventListener('change', async () => {
   await chrome.runtime.sendMessage({
     type: 'SAVE_SETTING',
@@ -1514,6 +1593,14 @@ selectMailProvider.addEventListener('change', async () => {
   await chrome.runtime.sendMessage({
     type: 'SAVE_SETTING', source: 'sidepanel',
     payload: { mailProvider: selectMailProvider.value },
+  });
+});
+
+selectQqMailDomain.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { qqMailDomain: selectQqMailDomain.value || 'standard' },
   });
 });
 

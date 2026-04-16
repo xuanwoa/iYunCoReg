@@ -37,8 +37,10 @@ const DEFAULT_STATE = {
   oauthUrl: null,
   autoDeleteUsedIcloudAlias: false,
   forceRefreshOAuthBeforeStep6: false,
+  debugFreeStepExecution: false,
   email: null,
   password: null,
+  signupHasPassword: null,
   accounts: [], // Successfully completed accounts: { email, password, createdAt }
   manualAliasUsage: {},
   preservedAliases: {},
@@ -52,11 +54,13 @@ const DEFAULT_STATE = {
   icloudHostPreference: 'auto',
   preferredIcloudHost: '',
   mailProvider: '163', // 'qq', '163', 'gmail', or 'inbucket'
+  qqMailDomain: 'standard', // 'standard' or 'enterprise'
   mailPollMaxAttempts: 24,
   mailPollIntervalMs: 3000,
   mailResendRounds: 2,
   inbucketHost: '',
   inbucketMailbox: '',
+  lastSignupVerificationCode: '',
 };
 
 async function getState() {
@@ -315,6 +319,15 @@ async function setIcloudAliasPreservedState(payload = {}) {
 function getErrorMessage(error) {
   if (typeof error === 'string') return error;
   return String(error?.message || error || 'Unknown error');
+}
+
+function isBenignNavigationChannelClose(error) {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes('message channel is closed')
+    || message.includes('message port closed')
+    || message.includes('before a response was received')
+    || message.includes('back/forward cache')
+    || message.includes('bfcache');
 }
 
 function normalizeIcloudHost(rawHost) {
@@ -810,6 +823,7 @@ async function resetState() {
       'icloudHostPreference',
       'preferredIcloudHost',
       'mailProvider',
+      'qqMailDomain',
       'mailPollMaxAttempts',
       'mailPollIntervalMs',
       'mailResendRounds',
@@ -839,7 +853,12 @@ async function resetState() {
     icloudHostPreference: prev.icloudHostPreference || 'auto',
     preferredIcloudHost: prev.preferredIcloudHost || '',
     mailProvider: prev.mailProvider || '163',
+<<<<<<< HEAD
     mailPollMaxAttempts: Number(prev.mailPollMaxAttempts) || 24,
+=======
+    qqMailDomain: prev.qqMailDomain || 'standard',
+    mailPollMaxAttempts: Number(prev.mailPollMaxAttempts) || 20,
+>>>>>>> upstream/main
     mailPollIntervalMs: Number(prev.mailPollIntervalMs) || 3000,
     mailResendRounds: Number(prev.mailResendRounds) || 2,
     inbucketHost: prev.inbucketHost || '',
@@ -907,6 +926,59 @@ async function isTabAlive(source) {
 async function getTabId(source) {
   const registry = await getTabRegistry();
   return registry[source]?.tabId || null;
+}
+
+async function unregisterTab(source) {
+  const registry = await getTabRegistry();
+  if (registry[source]) {
+    registry[source] = null;
+    await setState({ tabRegistry: registry });
+  }
+}
+
+async function closeRegisteredTab(source) {
+  const tabId = await getTabId(source);
+  if (!tabId) {
+    await unregisterTab(source);
+    return false;
+  }
+
+  try {
+    await chrome.tabs.remove(tabId);
+  } catch {}
+
+  await unregisterTab(source);
+  console.log(LOG_PREFIX, `Closed registered tab: ${source} (${tabId})`);
+  return true;
+}
+
+async function clearSignupSiteData() {
+  const origins = [
+    'https://chatgpt.com',
+    'https://auth.openai.com',
+    'https://auth0.openai.com',
+    'https://accounts.openai.com',
+  ];
+
+  await chrome.browsingData.remove(
+    {
+      origins,
+      since: 0,
+      originTypes: {
+        unprotectedWeb: true,
+      },
+    },
+    {
+      cookies: true,
+      cache: true,
+      cacheStorage: true,
+      fileSystems: true,
+      indexedDB: true,
+      localStorage: true,
+      serviceWorkers: true,
+      webSQL: true,
+    }
+  );
 }
 
 // ============================================================
@@ -1393,9 +1465,11 @@ async function handleMessage(message, sender) {
       if (message.payload.vpsUrl !== undefined) updates.vpsUrl = message.payload.vpsUrl;
       if (message.payload.autoDeleteUsedIcloudAlias !== undefined) updates.autoDeleteUsedIcloudAlias = Boolean(message.payload.autoDeleteUsedIcloudAlias);
       if (message.payload.forceRefreshOAuthBeforeStep6 !== undefined) updates.forceRefreshOAuthBeforeStep6 = Boolean(message.payload.forceRefreshOAuthBeforeStep6);
+      if (message.payload.debugFreeStepExecution !== undefined) updates.debugFreeStepExecution = Boolean(message.payload.debugFreeStepExecution);
       if (message.payload.customPassword !== undefined) updates.customPassword = message.payload.customPassword;
       if (message.payload.icloudHostPreference !== undefined) updates.icloudHostPreference = message.payload.icloudHostPreference;
       if (message.payload.mailProvider !== undefined) updates.mailProvider = message.payload.mailProvider;
+      if (message.payload.qqMailDomain !== undefined) updates.qqMailDomain = message.payload.qqMailDomain === 'enterprise' ? 'enterprise' : 'standard';
       if (message.payload.mailPollMaxAttempts !== undefined) updates.mailPollMaxAttempts = Number(message.payload.mailPollMaxAttempts) || DEFAULT_STATE.mailPollMaxAttempts;
       if (message.payload.mailPollIntervalMs !== undefined) updates.mailPollIntervalMs = Number(message.payload.mailPollIntervalMs) || DEFAULT_STATE.mailPollIntervalMs;
       if (message.payload.mailResendRounds !== undefined) updates.mailResendRounds = Number(message.payload.mailResendRounds) || DEFAULT_STATE.mailResendRounds;
@@ -1477,6 +1551,9 @@ async function handleStepData(step, payload) {
       break;
     case 3:
       if (payload.email) await setEmailState(payload.email);
+      if (payload.signupHasPassword !== undefined) {
+        await setState({ signupHasPassword: Boolean(payload.signupHasPassword) });
+      }
       break;
     case 4:
       if (payload.emailTimestamp) await setState({ lastEmailTimestamp: payload.emailTimestamp });
@@ -1700,6 +1777,132 @@ async function waitForSignupSurface(payload, timeout = 20000) {
   }
 
   throw new Error(`Signup page surface wait failed: ${getErrorMessage(lastError)}`);
+}
+
+const STEP3_PASSWORD_SELECTORS = [
+  'input[type="password"]',
+  'input[name="password"]',
+  'input[id*="password" i]',
+  'input[autocomplete="new-password"]',
+  'input[autocomplete="current-password"]',
+  'input[autocomplete*="password" i]',
+  'input[aria-label*="密码"]',
+  'input[aria-label*="password" i]',
+  'input[placeholder*="密码"]',
+  'input[placeholder*="password" i]',
+];
+
+const STEP3_POST_SIGNUP_SELECTORS = [
+  'input[name="code"]',
+  'input[name="otp"]',
+  'input[type="text"][maxlength="6"]',
+  'input[maxlength="1"]',
+  'input[aria-label*="code" i]',
+  'input[placeholder*="code" i]',
+  'input[inputmode="numeric"]',
+  'input[name="name"]',
+  'input[placeholder*="全名"]',
+  'input[placeholder*="full name" i]',
+  '[role="spinbutton"][data-type="year"]',
+  'input[name="birthday"]',
+  'input[name="age"]',
+];
+
+function isStep3PasswordSurface(selector = '') {
+  return STEP3_PASSWORD_SELECTORS.includes(selector);
+}
+
+async function completeStepFromBackground(step, payload = {}) {
+  await setStepStatus(step, 'completed');
+  await addLog(`Step ${step} completed`, 'ok');
+  await handleStepData(step, payload);
+  notifyStepComplete(step, payload);
+}
+
+async function waitForSignupTabPostStep5Settled(options = {}) {
+  const {
+    timeoutMs = 15000,
+    transitionGraceMs = 4000,
+    stableCompleteMs = 1200,
+  } = options;
+
+  const tabId = await getTabId('signup-page');
+  if (!tabId) return;
+
+  let baselineTab = null;
+  try {
+    baselineTab = await chrome.tabs.get(tabId);
+  } catch {
+    return;
+  }
+
+  const baselineUrl = baselineTab?.url || '';
+  const startedAt = Date.now();
+  let navigationObserved = false;
+  let loggedWait = false;
+  let stableSince = baselineTab?.status === 'complete' ? Date.now() : 0;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    throwIfStopped();
+
+    let currentTab = null;
+    try {
+      currentTab = await chrome.tabs.get(tabId);
+    } catch {
+      return;
+    }
+
+    const urlChanged = Boolean(baselineUrl) && currentTab.url !== baselineUrl;
+    const isLoading = currentTab.status === 'loading';
+
+    if (!navigationObserved && (urlChanged || isLoading)) {
+      navigationObserved = true;
+      stableSince = 0;
+      if (!loggedWait) {
+        loggedWait = true;
+        await addLog('Step 6: Detected ongoing post-step-5 navigation. Waiting for the signup tab to settle...', 'info');
+      }
+    }
+
+    if (currentTab.status === 'complete') {
+      if (!stableSince) {
+        stableSince = Date.now();
+      }
+
+      const stableFor = Date.now() - stableSince;
+      const graceExpired = Date.now() - startedAt >= transitionGraceMs;
+
+      if ((navigationObserved && stableFor >= stableCompleteMs) || (!navigationObserved && graceExpired)) {
+        return;
+      }
+    } else {
+      stableSince = 0;
+    }
+
+    await sleepWithStop(250);
+  }
+
+  if (loggedWait) {
+    await addLog('Step 6: Signup tab was still transitioning after step 5, continuing with the current page state.', 'warn');
+  }
+}
+
+async function getSignupPageRecoveryState() {
+  const tabId = await getTabId('signup-page');
+  if (!tabId) {
+    return null;
+  }
+
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: 'CHECK_PAGE_RECOVERY_STATE',
+      source: 'background',
+      payload: {},
+    });
+    return response || null;
+  } catch {
+    return null;
+  }
 }
 
 function getAutoResumeStep(state) {
@@ -1986,8 +2189,11 @@ async function executeStep2(state) {
   if (!state.oauthUrl) {
     throw new Error('No OAuth URL. Complete step 1 first.');
   }
-  await addLog(`Step 2: Opening auth URL...`);
-  await reuseOrCreateTab('signup-page', state.oauthUrl);
+  await addLog('Step 2: Clearing ChatGPT/OpenAI site data for a fresh signup session...');
+  await clearSignupSiteData();
+  await closeRegisteredTab('signup-page');
+  await addLog('Step 2: Opening ChatGPT signup page...');
+  await reuseOrCreateTab('signup-page', 'https://chatgpt.com/');
 
   await sendToContentScript('signup-page', {
     type: 'EXECUTE_STEP',
@@ -2007,30 +2213,87 @@ async function executeStep3(state) {
   }
 
   const password = state.customPassword || generatePassword();
-  await setPasswordState(password);
 
-  await addLog(
-    `Step 3: Filling email ${state.email}, password ${state.customPassword ? 'customized' : 'generated'} (${password.length} chars)`
-  );
-  await sendToContentScript('signup-page', {
-    type: 'EXECUTE_STEP',
-    step: 3,
-    source: 'background',
-    payload: { email: state.email, password },
-  });
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    await addLog(
+      `Step 3: Filling email ${state.email}, password ${state.customPassword ? 'customized' : 'generated'} (${password.length} chars)`
+        + (attempt > 1 ? ` [retry ${attempt}/2]` : '')
+    );
 
-  await waitForSignupSurface({
-    step: 3,
-    selectors: [
-      'input[name="code"]',
-      'input[name="otp"]',
-      'input[maxlength="1"]',
-      'input[name="name"]',
-      'input[placeholder*="全名"]',
-      '[role="spinbutton"][data-type="year"]',
-      'input[name="age"]',
-    ],
-  });
+    try {
+      try {
+        await sendToContentScript('signup-page', {
+          type: 'EXECUTE_STEP',
+          step: 3,
+          source: 'background',
+          payload: { email: state.email, phase: 'email' },
+        });
+      } catch (err) {
+        if (!isBenignNavigationChannelClose(err)) {
+          throw err;
+        }
+
+        await addLog(
+          'Step 3: Email page navigated. Waiting for the next signup surface...',
+          'warn'
+        );
+      }
+
+      const nextSurface = await waitForSignupSurface({
+        step: '3-next',
+        timeout: 15000,
+        selectors: [...STEP3_PASSWORD_SELECTORS, ...STEP3_POST_SIGNUP_SELECTORS],
+      });
+
+      if (!isStep3PasswordSurface(nextSurface?.selector || '')) {
+        await setPasswordState('');
+        await addLog('Step 3: Signup flowed directly to verification/profile stage without a password page.', 'info');
+        await completeStepFromBackground(3, { email: state.email, signupHasPassword: false });
+        return;
+      }
+
+      await setPasswordState(password);
+      try {
+        await sendToContentScript('signup-page', {
+          type: 'EXECUTE_STEP',
+          step: 3,
+          source: 'background',
+          payload: { email: state.email, password, phase: 'password' },
+        });
+      } catch (err) {
+        if (!isBenignNavigationChannelClose(err)) {
+          throw err;
+        }
+
+        await addLog(
+          'Step 3: Password page navigated while continuing to the next step. Waiting for verification/profile stage...',
+          'warn'
+        );
+      }
+
+      await waitForSignupSurface({
+        step: 3,
+        selectors: STEP3_POST_SIGNUP_SELECTORS,
+      });
+      await completeStepFromBackground(3, { email: state.email, signupHasPassword: true });
+      return;
+    } catch (err) {
+      const recoveryState = await getSignupPageRecoveryState();
+      const canRecover = attempt < 2 && recoveryState?.recoverable && recoveryState.type === 'operation_timed_out';
+      if (!canRecover) {
+        throw err;
+      }
+
+      await addLog(
+        'Step 3: OpenAI showed "Operation timed out" after submit. Re-running step 2 and retrying step 3...',
+        'warn'
+      );
+
+      const latestState = await getState();
+      await executeStep2(latestState);
+      await sleepWithStop(1200);
+    }
+  }
 }
 
 // ============================================================
@@ -2062,6 +2325,10 @@ function getMailConfig(state) {
       inject: ['content/utils.js', 'content/inbucket-mail.js'],
       injectSource: 'inbucket-mail',
     };
+  }
+  const qqMailDomain = state?.qqMailDomain === 'enterprise' ? 'enterprise' : 'standard';
+  if (qqMailDomain === 'enterprise') {
+    return { source: 'qq-mail', url: 'https://exmail.qq.com/', label: 'QQ Exmail' };
   }
   return { source: 'qq-mail', url: 'https://wx.mail.qq.com/', label: 'QQ Mail' };
 }
@@ -2164,9 +2431,11 @@ async function pollVerificationCodeWithAutoResend(options) {
     successSelectors,
     successMessage,
     resendRounds = 3,
+    beforeResend = null,
   } = options;
 
   let currentFilterAfter = pollPayload.filterAfterTimestamp || 0;
+  const verificationResultTimeoutMs = 60000;
 
   for (let round = 1; round <= resendRounds; round++) {
     const currentPayload = {
@@ -2182,6 +2451,17 @@ async function pollVerificationCodeWithAutoResend(options) {
     });
 
     if (result?.code) {
+      const latestState = await getState();
+      if (step === 7 && latestState.lastSignupVerificationCode && result.code === latestState.lastSignupVerificationCode) {
+        currentFilterAfter = Math.max(currentFilterAfter, result.emailTimestamp || Date.now());
+        await addLog(
+          `Step 7: Ignoring code ${result.code} because it matches the signup verification code from step 4. Waiting for a fresh login code...`,
+          'warn'
+        );
+        round -= 1;
+        continue;
+      }
+
       await setState({ lastEmailTimestamp: result.emailTimestamp || Date.now() });
       await addLog(`Step ${step}: ${successMessage}: ${result.code}`);
 
@@ -2197,10 +2477,32 @@ async function pollVerificationCodeWithAutoResend(options) {
         source: 'background',
         payload: { code: result.code },
       });
-      await waitForSignupSurface({
+      const submissionResult = await waitForSignupSurface({
         step,
         selectors: successSelectors,
-      });
+        errorPatterns: [
+          /代码不正确/i,
+          /验证码不正确/i,
+          /code is incorrect/i,
+          /incorrect code/i,
+          /invalid code/i,
+        ],
+      }, verificationResultTimeoutMs);
+
+      if (submissionResult?.invalidCode) {
+        currentFilterAfter = Date.now();
+        await addLog(
+          `Step ${step}: Verification code was rejected by the page (${submissionResult.errorMessage || 'invalid code'}). Waiting for a fresh code...`,
+          'warn'
+        );
+        round -= 1;
+        continue;
+      }
+
+      if (step === 4) {
+        await setState({ lastSignupVerificationCode: result.code });
+      }
+
       return;
     }
 
@@ -2215,6 +2517,10 @@ async function pollVerificationCodeWithAutoResend(options) {
 
     if (round >= resendRounds) {
       throw new Error(pollError);
+    }
+
+    if (typeof beforeResend === 'function') {
+      await beforeResend({ step, round, resendRounds });
     }
 
     await addLog(`Step ${step}: No verification email received on round ${round}/${resendRounds}. Trying to resend code...`, 'warn');
@@ -2287,6 +2593,7 @@ async function executeStep4(state) {
       successSelectors: [
         'input[name="name"]',
         'input[placeholder*="全名"]',
+        'input[placeholder*="full name" i]',
         '[role="spinbutton"][data-type="year"]',
         'input[name="birthday"]',
         'input[name="age"]',
@@ -2470,6 +2777,7 @@ async function executeStep6(state) {
     throw new Error('No email. Complete step 3 first.');
   }
 
+  await waitForSignupTabPostStep5Settled();
   await addLog(`Step 6: Opening OAuth URL for login...`);
   // Reuse the signup-page tab — navigate it to the OAuth URL
   await reuseOrCreateTab('signup-page', state.oauthUrl);
@@ -2479,7 +2787,11 @@ async function executeStep6(state) {
     type: 'EXECUTE_STEP',
     step: 6,
     source: 'background',
-    payload: { email: state.email, password: state.password },
+    payload: {
+      email: state.email,
+      password: state.password,
+      preferPasswordlessLogin: state.signupHasPassword === false,
+    },
   });
 
   await waitForSignupSurface({
@@ -2540,9 +2852,12 @@ async function executeStep7(state) {
       successSelectors: [
         'button[type="submit"][data-dd-action-name="Continue"]',
         'button[type="submit"]._primary_3rdp0_107',
-        'button[aria-label*="Continue"]',
+        'button[aria-label*="Continue" i]',
       ],
       resendRounds: mailPollConfig.resendRounds,
+      beforeResend: async () => {
+        await refreshOAuthIfTimedOutBeforeStep7Resend();
+      },
     });
   } catch (err) {
     if (isMailLoginRequiredError(err)) {
@@ -2762,7 +3077,7 @@ async function executeStep9(state) {
   await new Promise(r => setTimeout(r, 1000));
 
   await addLog(`Step 9: Completing authorization in ${authPanel.label}...`);
-  await chrome.tabs.sendMessage(tabId, {
+  const response = await chrome.tabs.sendMessage(tabId, {
     type: 'EXECUTE_STEP',
     step: 9,
     source: 'background',
@@ -2772,6 +3087,10 @@ async function executeStep9(state) {
       authPanelProvider: authPanel.provider,
     },
   });
+
+  if (response?.error) {
+    throw new Error(response.error);
+  }
 }
 
 // ============================================================

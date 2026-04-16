@@ -47,7 +47,7 @@
       <div class="data-row">
         <span class="data-label" data-i18n="labelCpaAuth">CPA Auth</span>
         <div class="data-inline">
-          <input type="password" id="input-vps-url" class="data-input" placeholder="http://ip:port/management.html#/oauth" data-i18n-placeholder="placeholderCpaAuth" />
+          <input type="password" id="input-vps-url" class="data-input" placeholder="Sub2API or CPA URL" data-i18n-placeholder="placeholderCpaAuth" />
           <button id="btn-paste-vps-url" class="btn btn-outline btn-sm" type="button" data-i18n="btnPaste">Paste</button>
         </div>
       </div>
@@ -84,13 +84,27 @@
           <span data-i18n="step6ForceRefresh">每次执行第 6 步前强制重新获取 OAuth</span>
         </label>
       </div>
+      <div class="data-row">
+        <span class="data-label" data-i18n="labelDebug">Debug</span>
+        <label class="option-toggle" for="checkbox-debug-free-step-execution">
+          <input type="checkbox" id="checkbox-debug-free-step-execution" />
+          <span data-i18n="debugFreeStepExecution">允许自由执行任意 Step</span>
+        </label>
+      </div>
       <div class="data-row" id="row-mail-provider">
         <span class="data-label" data-i18n="labelVerify">Verify</span>
         <select id="select-mail-provider" class="data-select">
           <option value="163" data-i18n="mailProvider163">163 Mail (mail.163.com)</option>
-          <option value="qq" data-i18n="mailProviderQq">QQ Mail (wx.mail.qq.com)</option>
+          <option value="qq" data-i18n="mailProviderQq">QQ Mail</option>
           <option value="gmail" data-i18n="mailProviderGmail">Gmail (mail.google.com)</option>
           <option value="inbucket" data-i18n="mailProviderInbucket">Inbucket (custom host)</option>
+        </select>
+      </div>
+      <div class="data-row" id="row-qq-mail-domain" style="display:none;">
+        <span class="data-label" data-i18n="labelQqDomain">QQ 域名</span>
+        <select id="select-qq-mail-domain" class="data-select">
+          <option value="standard" data-i18n="qqDomainStandard">普通 (wx.mail.qq.com)</option>
+          <option value="enterprise" data-i18n="qqDomainEnterprise">企业 (exmail.qq.com)</option>
         </select>
       </div>
       <div class="data-row" id="row-mail-poll-config">

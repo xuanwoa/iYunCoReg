@@ -1,11 +1,11 @@
-// content/signup-page.js — Content script for OpenAI auth pages (steps 2, 3, 4-receive, 5)
-// Injected on: auth0.openai.com, auth.openai.com, accounts.openai.com
+// content/signup-page.js — Content script for OpenAI signup/auth pages (steps 2, 3, 4-receive, 5)
+// Injected on: chatgpt.com, auth0.openai.com, auth.openai.com, accounts.openai.com
 
 console.log('[MultiPage:signup-page] Content script loaded on', location.href);
 
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'EXECUTE_STEP' || message.type === 'FILL_CODE' || message.type === 'STEP8_FIND_AND_CLICK' || message.type === 'WAIT_FOR_SURFACE' || message.type === 'RESEND_VERIFICATION_CODE') {
+  if (message.type === 'EXECUTE_STEP' || message.type === 'FILL_CODE' || message.type === 'STEP8_FIND_AND_CLICK' || message.type === 'WAIT_FOR_SURFACE' || message.type === 'RESEND_VERIFICATION_CODE' || message.type === 'CHECK_PAGE_RECOVERY_STATE') {
     resetStopState();
     handleCommand(message).then((result) => {
       sendResponse({ ok: true, ...(result || {}) });
@@ -24,6 +24,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       if (message.type === 'RESEND_VERIFICATION_CODE') {
         log(`Step ${message.step}: ${err.message}`, 'error');
+        sendResponse({ error: err.message });
+        return;
+      }
+
+      if (message.type === 'WAIT_FOR_SURFACE' || message.type === 'CHECK_PAGE_RECOVERY_STATE') {
         sendResponse({ error: err.message });
         return;
       }
@@ -55,7 +60,31 @@ async function handleCommand(message) {
       return await waitForSurfacePayload(message.payload);
     case 'RESEND_VERIFICATION_CODE':
       return await resendVerificationCode(message.step, message.payload);
+    case 'CHECK_PAGE_RECOVERY_STATE':
+      return getPageRecoveryState();
   }
+}
+
+function getPageRecoveryState() {
+  const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+  const hasOopsHeading = /糟糕，出错了|something went wrong/i.test(bodyText);
+  const hasOperationTimedOut = /operation timed out/i.test(bodyText);
+
+  if (hasOopsHeading && hasOperationTimedOut) {
+    return {
+      recoverable: true,
+      type: 'operation_timed_out',
+      message: 'Operation timed out',
+      url: location.href,
+    };
+  }
+
+  return {
+    recoverable: false,
+    type: '',
+    message: '',
+    url: location.href,
+  };
 }
 
 async function ensureAuthSurfaceReady(step, timeout = 15000) {
@@ -103,6 +132,7 @@ async function waitForSurfacePayload(payload = {}) {
   const {
     step = 'surface',
     selectors = [],
+    errorPatterns = [],
     timeout = 15000,
     minReadyState = 'interactive',
   } = payload;
@@ -112,18 +142,61 @@ async function waitForSurfacePayload(payload = {}) {
     return { readyState: document.readyState, url: location.href };
   }
 
-  const found = await waitForAnySelector(selectors, timeout);
-  if (!found) {
-    throw new Error(`Step ${step}: Expected next page surface not found within ${timeout}ms. URL: ${location.href}`);
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    const found = await waitForAnySelector(selectors, 400);
+    if (found) {
+      log(`Step ${step}: Surface confirmed by ${found.selector} at readyState ${document.readyState}`);
+      return {
+        selector: found.selector,
+        readyState: document.readyState,
+        url: location.href,
+        minReadyState,
+      };
+    }
+
+    const matchedError = findVerificationErrorMessage(errorPatterns);
+    if (matchedError) {
+      log(`Step ${step}: Verification error detected: ${matchedError}`, 'warn');
+      return {
+        invalidCode: true,
+        errorMessage: matchedError,
+        readyState: document.readyState,
+        url: location.href,
+        minReadyState,
+      };
+    }
   }
 
-  log(`Step ${step}: Surface confirmed by ${found.selector} at readyState ${document.readyState}`);
-  return {
-    selector: found.selector,
-    readyState: document.readyState,
-    url: location.href,
-    minReadyState,
-  };
+  throw new Error(`Step ${step}: Expected next page surface not found within ${timeout}ms. URL: ${location.href}`);
+}
+
+function findVerificationErrorMessage(errorPatterns = []) {
+  if (!Array.isArray(errorPatterns) || errorPatterns.length === 0) return '';
+
+  const candidates = Array.from(document.querySelectorAll([
+    '[slot="errorMessage"]',
+    '.react-aria-FieldError',
+    'li._error_18qcl_110',
+    '[aria-live="polite"]',
+    '[role="alert"]',
+  ].join(', ')));
+
+  for (const node of candidates) {
+    const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!text) continue;
+
+    for (const pattern of errorPatterns) {
+      const regex = pattern instanceof RegExp ? pattern : new RegExp(String(pattern), 'i');
+      if (regex.test(text)) {
+        return text;
+      }
+    }
+  }
+
+  return '';
 }
 
 // ============================================================
@@ -132,24 +205,36 @@ async function waitForSurfacePayload(payload = {}) {
 
 async function step2_clickRegister() {
   await ensureAuthSurfaceReady(2);
+  await waitForDocumentReady('complete', 20000);
+  await sleep(300);
+  log(`Step 2: Landing page fully loaded with readyState ${document.readyState}`);
   log('Step 2: Looking for Register/Sign up button...');
 
   let registerBtn = null;
   try {
-    registerBtn = await waitForElementByText(
-      'a, button, [role="button"], [role="link"]',
-      /sign\s*up|register|create\s*account|注册/i,
-      10000
+    registerBtn = await waitForElement(
+      'button[data-testid="signup-button"], a[data-testid="signup-button"]',
+      8000
     );
   } catch {
-    // Some pages may have a direct link
     try {
-      registerBtn = await waitForElement('a[href*="signup"], a[href*="register"]', 5000);
-    } catch {
-      throw new Error(
-        'Could not find Register/Sign up button. ' +
-        'Check auth page DOM in DevTools. URL: ' + location.href
+      registerBtn = await waitForElementByText(
+        'a, button, [role="button"], [role="link"]',
+        /免费注册|sign\s*up|register|create\s*account/i,
+        8000
       );
+    } catch {
+      try {
+        registerBtn = await waitForElement(
+          'a[href*="signup"], a[href*="register"], a[href*="create-account"]',
+          5000
+        );
+      } catch {
+        throw new Error(
+          'Could not find Register/Sign up button. ' +
+          'Check signup page DOM in DevTools. URL: ' + location.href
+        );
+      }
     }
   }
 
@@ -158,8 +243,14 @@ async function step2_clickRegister() {
   simulateClick(registerBtn);
   log('Step 2: Clicked Register button');
   await waitForPostClickTransition(2, previousUrl, [
+    'input#email',
     'input[type="email"]',
     'input[name="email"]',
+    'input[autocomplete*="email" i]',
+    'input[aria-label*="电子邮件地址"]',
+    'input[aria-label*="email" i]',
+    'input[placeholder*="电子邮件地址"]',
+    'input[placeholder*="email" i]',
     'input[name="username"]',
     'input[type="password"]',
     'input[name="name"]',
@@ -173,17 +264,37 @@ async function step2_clickRegister() {
 // ============================================================
 
 async function step3_fillEmailPassword(payload) {
+  const phase = payload?.phase || 'email';
+
+  if (phase === 'password') {
+    return await step3_fillPassword(payload);
+  }
+
+  return await step3_submitEmail(payload);
+}
+
+async function step3_submitEmail(payload) {
   const { email } = payload;
   if (!email) throw new Error('No email provided. Paste email in Side Panel first.');
 
   await ensureAuthSurfaceReady(3);
   log(`Step 3: Filling email: ${email}`);
 
-  // Find email input
   let emailInput = null;
   try {
     emailInput = await waitForElement(
-      'input[type="email"], input[name="email"], input[name="username"], input[id*="email"], input[placeholder*="email"], input[placeholder*="Email"]',
+      [
+        'input#email',
+        'input[name="email"]',
+        'input[type="email"]',
+        'input[autocomplete*="email" i]',
+        'input[aria-label*="电子邮件地址"]',
+        'input[aria-label*="email" i]',
+        'input[placeholder*="电子邮件地址"]',
+        'input[placeholder*="email" i]',
+        'input[name="username"]',
+        'input[id*="email"]',
+      ].join(', '),
       10000
     );
   } catch {
@@ -194,47 +305,105 @@ async function step3_fillEmailPassword(payload) {
   fillInput(emailInput, email);
   log('Step 3: Email filled');
 
-  // Check if password field is on the same page
-  let passwordInput = document.querySelector('input[type="password"]');
-
-  if (!passwordInput) {
-    // Need to submit email first to get to password page
-    log('Step 3: No password field yet, submitting email first...');
-    const submitBtn = document.querySelector('button[type="submit"]')
-      || await waitForElementByText('button', /continue|next|submit|继续|下一步/i, 5000).catch(() => null);
-
-    if (submitBtn) {
-      await humanPause(400, 1100);
-      simulateClick(submitBtn);
-      log('Step 3: Submitted email, waiting for password field...');
-      await sleep(2000);
-    }
-
-    try {
-      passwordInput = await waitForElement('input[type="password"]', 10000);
-    } catch {
-      throw new Error('Could not find password input after submitting email. URL: ' + location.href);
-    }
+  const emailSubmitBtn = await findEmailContinueButton().catch(() => null);
+  if (!emailSubmitBtn) {
+    throw new Error('Could not find Continue button after filling email. URL: ' + location.href);
   }
 
-  if (!payload.password) throw new Error('No password provided. Step 3 requires a generated password.');
+  await humanPause(400, 1100);
+  simulateClick(emailSubmitBtn);
+  log('Step 3: Submitted email');
+  return { submittedEmail: true };
+}
+
+async function step3_fillPassword(payload) {
+  const { email, password } = payload;
+  if (!password) throw new Error('No password provided. Step 3 requires a generated password.');
+
+  await ensureAuthSurfaceReady(3);
+  log('Step 3: Filling password on password page...');
+
+  let passwordInput = null;
+  try {
+    passwordInput = await waitForElement(
+      [
+        'input[type="password"]',
+        'input[name="password"]',
+        'input[id*="password" i]',
+        'input[autocomplete="new-password"]',
+        'input[autocomplete="current-password"]',
+        'input[autocomplete*="password" i]',
+        'input[aria-label*="密码"]',
+        'input[aria-label*="password" i]',
+        'input[placeholder*="密码"]',
+        'input[placeholder*="password" i]',
+      ].join(', '),
+      10000
+    );
+  } catch {
+    throw new Error('Could not find password input on password page. URL: ' + location.href);
+  }
+
   await humanPause(600, 1500);
-  fillInput(passwordInput, payload.password);
+  fillInput(passwordInput, password);
   log('Step 3: Password filled');
 
-  // Report complete BEFORE submit, because submit causes page navigation
-  // which kills the content script connection
-  reportComplete(3, { email });
-
-  // Submit the form (page will navigate away after this)
   await sleep(500);
-  const submitBtn = document.querySelector('button[type="submit"]')
-    || await waitForElementByText('button', /continue|sign\s*up|submit|注册|创建|create/i, 5000).catch(() => null);
+  const submitBtn = await findPasswordContinueButton().catch(() => null);
 
-  if (submitBtn) {
-    await humanPause(500, 1300);
-    simulateClick(submitBtn);
-    log('Step 3: Form submitted');
+  if (!submitBtn) {
+    throw new Error('Could not find Continue button after filling password. URL: ' + location.href);
+  }
+
+  await humanPause(500, 1300);
+  simulateClick(submitBtn);
+  log('Step 3: Password form submitted');
+  return { submittedPassword: true };
+}
+
+async function findEmailContinueButton() {
+  const selector = [
+    'button[type="submit"].btn-primary',
+    'button.btn.btn-primary[type="submit"]',
+    'button[type="submit"]',
+  ].join(', ');
+
+  const directMatch = Array.from(document.querySelectorAll(selector)).find(button => {
+    const text = (button.textContent || '').replace(/\s+/g, ' ').trim();
+    return /^(继续|continue)$/i.test(text) || /继续|continue/i.test(text);
+  });
+
+  if (directMatch) {
+    return directMatch;
+  }
+
+  try {
+    return await waitForElementByText('button[type="submit"], button.btn-primary, button', /继续|continue/i, 5000);
+  } catch {
+    return await waitForElementByText('button', /继续|continue|next|submit/i, 5000);
+  }
+}
+
+async function findPasswordContinueButton() {
+  const selector = [
+    'button[type="submit"].btn-primary',
+    'button.btn.btn-primary[type="submit"]',
+    'button[type="submit"]',
+  ].join(', ');
+
+  const directMatch = Array.from(document.querySelectorAll(selector)).find(button => {
+    const text = (button.textContent || '').replace(/\s+/g, ' ').trim();
+    return /^(继续|continue)$/i.test(text) || /继续|continue/i.test(text);
+  });
+
+  if (directMatch) {
+    return directMatch;
+  }
+
+  try {
+    return await waitForElementByText('button[type="submit"], button.btn-primary, button', /继续|continue/i, 5000);
+  } catch {
+    return await waitForElementByText('button', /继续|continue|next|sign\s*up|submit|注册|创建|create/i, 5000);
   }
 }
 
@@ -253,7 +422,7 @@ async function fillVerificationCode(step, payload) {
   let codeInput = null;
   try {
     codeInput = await waitForElement(
-      'input[name="code"], input[name="otp"], input[type="text"][maxlength="6"], input[aria-label*="code"], input[placeholder*="code"], input[placeholder*="Code"], input[inputmode="numeric"]',
+      'input[name="code"], input[name="otp"], input[type="text"][maxlength="6"], input[aria-label*="code" i], input[placeholder*="code" i], input[inputmode="numeric"]',
       10000
     );
   } catch {
@@ -317,7 +486,7 @@ async function findVerificationResendButton(timeout = 10000) {
     return await waitForElement(selector, timeout);
   } catch {
     try {
-      return await waitForElementByText('button', /重新发送电子邮件|重新发送|resend email|resend/i, Math.max(3000, timeout / 2));
+      return await waitForElementByText('button', /重新发送电子邮件|重新发送|resend email|resend|send again/i, Math.max(3000, timeout / 2));
     } catch {
       throw new Error('Could not find the resend button on the verification page. URL: ' + location.href);
     }
@@ -329,7 +498,7 @@ async function findVerificationResendButton(timeout = 10000) {
 // ============================================================
 
 async function step6_login(payload) {
-  const { email, password } = payload;
+  const { email, password, preferPasswordlessLogin } = payload;
   if (!email) throw new Error('No email provided for login.');
 
   await ensureAuthSurfaceReady(6);
@@ -360,7 +529,27 @@ async function step6_login(payload) {
     log('Step 6: Submitted email');
   }
 
-  const passwordInput = await waitForLoginPasswordField();
+  const nextLoginAction = await waitForLoginNextAction({
+    preferPasswordlessLogin: Boolean(preferPasswordlessLogin),
+  });
+
+  if (nextLoginAction?.type === 'passwordless') {
+    log('Step 6: Passwordless login option detected, sending one-time code...');
+    await waitForButtonEnabled(nextLoginAction.button);
+    reportComplete(6, { needsOTP: true });
+    await humanPause(450, 1200);
+    simulateClick(nextLoginAction.button);
+    log('Step 6: Requested one-time login code');
+    return;
+  }
+
+  if (nextLoginAction?.type === 'code') {
+    log('Step 6: Verification code page appeared directly after email submit.');
+    reportComplete(6, { needsOTP: true });
+    return;
+  }
+
+  const passwordInput = nextLoginAction?.type === 'password' ? nextLoginAction.input : null;
   if (passwordInput) {
     log('Step 6: Password field found, filling password...');
     await humanPause(550, 1450);
@@ -385,22 +574,47 @@ async function step6_login(payload) {
   reportComplete(6, { needsOTP: true });
 }
 
-async function waitForLoginPasswordField(timeout = 25000) {
+async function waitForLoginNextAction(options = {}) {
+  const {
+    preferPasswordlessLogin = false,
+    timeout = 25000,
+  } = options;
   const start = Date.now();
+  let passwordCandidate = null;
 
   while (Date.now() - start < timeout) {
     throwIfStopped();
 
+    const passwordlessButton = findVisiblePasswordlessLoginButton();
+    if (passwordlessButton) {
+      return { type: 'passwordless', button: passwordlessButton };
+    }
+
+    const codeInput = findVisibleVerificationCodeInput();
+    if (codeInput) {
+      return { type: 'code', input: codeInput };
+    }
+
     const passwordInput = findVisiblePasswordInput();
     if (passwordInput) {
-      return passwordInput;
+      if (!preferPasswordlessLogin) {
+        return { type: 'password', input: passwordInput };
+      }
+
+      if (!passwordCandidate) {
+        passwordCandidate = passwordInput;
+      }
     }
 
     await sleep(250);
   }
 
-  log(`Step 6: Password field did not appear within ${Math.round(timeout / 1000)}s.`, 'warn');
-  return null;
+  if (preferPasswordlessLogin && passwordCandidate) {
+    throw new Error('Passwordless login button did not appear on the login page. URL: ' + location.href);
+  }
+
+  log(`Step 6: Login action did not appear within ${Math.round(timeout / 1000)}s.`, 'warn');
+  return passwordCandidate ? { type: 'password', input: passwordCandidate } : null;
 }
 
 function findVisiblePasswordInput() {
@@ -410,6 +624,43 @@ function findVisiblePasswordInput() {
       return input;
     }
   }
+  return null;
+}
+
+function findVisiblePasswordlessLoginButton() {
+  const selector = [
+    'button[name="intent"][value="passwordless_login_send_otp"]',
+    'button[value="passwordless_login_send_otp"]',
+  ].join(', ');
+
+  const buttons = document.querySelectorAll(selector);
+  for (const button of buttons) {
+    if (isElementVisible(button)) {
+      return button;
+    }
+  }
+
+  return null;
+}
+
+function findVisibleVerificationCodeInput() {
+  const selector = [
+    'input[name="code"]',
+    'input[name="otp"]',
+    'input[type="text"][maxlength="6"]',
+    'input[maxlength="1"]',
+    'input[aria-label*="code" i]',
+    'input[placeholder*="code" i]',
+    'input[inputmode="numeric"]',
+  ].join(', ');
+
+  const inputs = document.querySelectorAll(selector);
+  for (const input of inputs) {
+    if (isElementVisible(input)) {
+      return input;
+    }
+  }
+
   return null;
 }
 
@@ -434,8 +685,18 @@ async function step8_findAndClick() {
   await ensureAuthSurfaceReady(8);
   log('Step 8: Looking for OAuth consent "继续" button...');
 
+  const phoneRequiredError = findStep8BlockingError();
+  if (phoneRequiredError) {
+    throw new Error(`${phoneRequiredError}。请更换环境重试。`);
+  }
+
   const continueBtn = await findContinueButton();
   await waitForButtonEnabled(continueBtn);
+
+  const phoneRequiredErrorAfterButton = findStep8BlockingError();
+  if (phoneRequiredErrorAfterButton) {
+    throw new Error(`${phoneRequiredErrorAfterButton}。请更换环境重试。`);
+  }
 
   await humanPause(350, 900);
   continueBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -451,6 +712,25 @@ async function step8_findAndClick() {
   };
 }
 
+function findStep8BlockingError() {
+  const candidates = Array.from(document.querySelectorAll([
+    'h1',
+    '[role="alert"]',
+    '[aria-live="polite"]',
+    '[class*="error"]',
+  ].join(', ')));
+
+  for (const node of candidates) {
+    const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!text) continue;
+    if (/电话号码是必填项|phone number is required|required phone number/i.test(text)) {
+      return text;
+    }
+  }
+
+  return '';
+}
+
 async function findContinueButton() {
   try {
     return await waitForElement(
@@ -459,7 +739,7 @@ async function findContinueButton() {
     );
   } catch {
     try {
-      return await waitForElementByText('button', /继续|Continue/, 5000);
+      return await waitForElementByText('button', /继续|continue|allow|authorize|agree/i, 5000);
     } catch {
       throw new Error('Could not find "继续" button on OAuth consent page. URL: ' + location.href);
     }
@@ -524,7 +804,7 @@ async function step5_fillNameBirthday(payload) {
   let nameInput = null;
   try {
     nameInput = await waitForElement(
-      'input[name="name"], input[placeholder*="全名"], input[autocomplete="name"]',
+      'input[name="name"], input[placeholder*="全名"], input[placeholder*="full name" i], input[autocomplete="name"]',
       10000
     );
   } catch {

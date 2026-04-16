@@ -89,7 +89,7 @@ function findGenerateAuthButton() {
 }
 
 function findAddAccountButton() {
-  return findVisibleButtonByText(/添加账号|add account/i);
+  return findVisibleButtonByText(/添加账号|add account|create account/i);
 }
 
 function findOpenAiButton() {
@@ -179,7 +179,7 @@ async function checkOauthTimeoutStatus() {
 }
 
 async function ensureAccountModalReady(targetEmail) {
-  const nameInput = await waitForElement('input[data-tour="account-form-name"], input[placeholder*="账号名称"]', 10000);
+  const nameInput = await waitForElement('input[data-tour="account-form-name"], input[placeholder*="账号名称"], input[placeholder*="account name" i]', 10000);
   await humanPause(350, 900);
   fillInput(nameInput, targetEmail);
   log(`Step 1: Filled Sub2API account name: ${targetEmail}`);
@@ -240,7 +240,7 @@ async function step1_getOAuthLink(payload = {}) {
 
   let generateButton = findGenerateAuthButton();
   if (!generateButton) {
-    const addAccountButton = findAddAccountButton() || await waitForElementByText('button', /添加账号|add account/i, 15000);
+    const addAccountButton = findAddAccountButton() || await waitForElementByText('button', /添加账号|add account|create account/i, 15000);
     await humanPause(250, 700);
     simulateClick(addAccountButton);
     log('Step 1: Clicked "添加账号" in Sub2API');
