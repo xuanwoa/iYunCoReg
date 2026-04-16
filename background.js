@@ -1530,7 +1530,22 @@ async function handleMessage(message, sender) {
     case 'SET_OAUTH_QUEUE': {
       clearStopRequest();
       const queue = message.payload.oauthQueue || [];
-      await setState({ oauthQueue: queue });
+      const extracted = message.payload.allExtractedAccounts || [];
+      
+      const state = await getState();
+      const newAccounts = [...(state.accounts || [])];
+      
+      const existingEmails = new Set(newAccounts.map(a => String(a?.email || '').trim().toLowerCase()).filter(Boolean));
+      
+      for (const acc of extracted) {
+        const emailLower = String(acc.email || '').trim().toLowerCase();
+        if (emailLower && !existingEmails.has(emailLower)) {
+          newAccounts.push(acc);
+          existingEmails.add(emailLower);
+        }
+      }
+      
+      await setState({ oauthQueue: queue, accounts: newAccounts });
       return { ok: true };
     }
 

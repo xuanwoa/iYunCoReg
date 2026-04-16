@@ -1418,6 +1418,7 @@ if (btnExportVaultwarden) {
       }
 
       const oauthQueue = [];
+      const allExtractedAccounts = [];
       for (let i = 1; i < lines.length; i++) {
         const line = lines[i].trim();
         if(!line) continue;
@@ -1436,13 +1437,24 @@ if (btnExportVaultwarden) {
         const username = cols[userIndex]?.replace(/^"|"$/g, '').trim();
         const password = cols[passIndex]?.replace(/^"|"$/g, '').trim();
         const fields = cols[fieldsIndex] || '';
-        if (username && fields.includes('is_oauth_completed:false')) {
-            oauthQueue.push({ email: username, password });
+        
+        if (username) {
+            const isCompleted = fields.includes('is_oauth_completed:true');
+            allExtractedAccounts.push({ 
+                email: username, 
+                password: password, 
+                is_oauth_completed: isCompleted, 
+                createdAt: Date.now() 
+            });
+            
+            if (fields.includes('is_oauth_completed:false')) {
+                oauthQueue.push({ email: username, password });
+            }
         }
       }
 
-      if (oauthQueue.length === 0) {
-        showToast(currentLanguage === 'zh-CN' ? '没有扫描到未授权帐号' : 'No incomplete OAuth accounts found', 'warn');
+      if (allExtractedAccounts.length === 0) {
+        showToast(currentLanguage === 'zh-CN' ? '没有扫描到任何有效账号' : 'No valid accounts found in CSV', 'warn');
         return;
       }
 
@@ -1450,10 +1462,10 @@ if (btnExportVaultwarden) {
         const response = await chrome.runtime.sendMessage({
           type: 'SET_OAUTH_QUEUE',
           source: 'sidepanel',
-          payload: { oauthQueue }
+          payload: { oauthQueue, allExtractedAccounts }
         });
         if (response?.error) throw new Error(response.error);
-        showToast(currentLanguage === 'zh-CN' ? `成功导入 ${oauthQueue.length} 个帐号` : `Imported ${oauthQueue.length} accounts`, 'success');
+        showToast(currentLanguage === 'zh-CN' ? `导入 ${allExtractedAccounts.length} 个账号 (待授权: ${oauthQueue.length})` : `Imported ${allExtractedAccounts.length} (${oauthQueue.length} pending OAuth)`, 'success');
         displayOauthQueue.textContent = oauthQueue.length;
       } catch(err) {
         showToast(`Import failed: ${err.message}`, 'error');
