@@ -239,10 +239,13 @@ function findVisibleRowDeleteButton(row) {
 
 function findTopToolbarDeleteButton() {
   const candidates = document.querySelectorAll([
-    'div[role="button"][aria-label="删除"]',
-    'div[role="button"][data-tooltip="删除"]',
-    'div[role="button"][aria-label="Delete"]',
-    'div[role="button"][data-tooltip="Delete"]',
+    'div[role="button"][aria-label*="删除"]',
+    'div[role="button"][data-tooltip*="删除"]',
+    'div[role="button"][aria-label*="Delete"]',
+    'div[role="button"][data-tooltip*="Delete"]',
+    'div[role="button"][aria-label*="刪除"]',
+    'div[role="button"][data-tooltip*="刪除"]',
+    'div[act="10"]',
     '.T-I.nX[role="button"]',
   ].join(', '));
 
@@ -308,10 +311,13 @@ async function deleteGmailItem(row, mailId) {
 
 function findRefreshButton() {
   const candidates = document.querySelectorAll([
-    'div[role="button"][aria-label="刷新"]',
-    'div[role="button"][data-tooltip="刷新"]',
-    'div[role="button"][aria-label="Refresh"]',
-    'div[role="button"][data-tooltip="Refresh"]',
+    'div[role="button"][aria-label*="刷新"]',
+    'div[role="button"][data-tooltip*="刷新"]',
+    'div[role="button"][aria-label*="Refresh"]',
+    'div[role="button"][data-tooltip*="Refresh"]',
+    'div[role="button"][aria-label*="重新整理"]',
+    'div[role="button"][data-tooltip*="重新整理"]',
+    'div[act="20"]',
     '.T-I.nu[role="button"]',
   ].join(', '));
 
@@ -326,7 +332,8 @@ function findRefreshButton() {
 async function refreshInbox() {
   const refreshButton = findRefreshButton();
   if (!refreshButton) {
-    throw new Error('Could not find Gmail refresh button.');
+    log('Gmail: Could not find refresh button. Relying on auto-refresh...', 'warn');
+    return;
   }
 
   simulateClick(refreshButton);
