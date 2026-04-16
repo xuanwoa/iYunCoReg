@@ -904,6 +904,19 @@ async function step5_fillNameBirthday(payload) {
     throw new Error('Could not find birthday or age input. URL: ' + location.href);
   }
 
+  await sleep(300);
+  const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+  if (checkboxes.length > 0) {
+    log(`Step 5: Found ${checkboxes.length} checkboxes, ensuring they are checked...`);
+    for (const cb of checkboxes) {
+      if (!cb.checked) {
+        const label = cb.closest('label');
+        simulateClick(label || cb);
+        await sleep(250);
+      }
+    }
+  }
+
   // Click "完成帐户创建" button
   await sleep(500);
   const completeBtn = document.querySelector('button[type="submit"]')

@@ -61,6 +61,8 @@ const DEFAULT_STATE = {
   inbucketHost: '',
   inbucketMailbox: '',
   lastSignupVerificationCode: '',
+  oauthQueue: [],
+  autoOauthActive: false,
 };
 
 async function getState() {
@@ -1059,6 +1061,7 @@ async function reuseOrCreateTab(source, url, options = {}) {
             target: { tabId },
             func: (injectedSource) => {
               window.__MULTIPAGE_SOURCE = injectedSource;
+              sessionStorage.setItem('__MULTIPAGE_SOURCE', injectedSource);
             },
             args: [options.injectSource],
           });
@@ -1101,6 +1104,7 @@ async function reuseOrCreateTab(source, url, options = {}) {
           target: { tabId },
           func: (injectedSource) => {
             window.__MULTIPAGE_SOURCE = injectedSource;
+            sessionStorage.setItem('__MULTIPAGE_SOURCE', injectedSource);
           },
           args: [options.injectSource],
         });
@@ -1139,6 +1143,7 @@ async function reuseOrCreateTab(source, url, options = {}) {
         target: { tabId: tab.id },
         func: (injectedSource) => {
           window.__MULTIPAGE_SOURCE = injectedSource;
+          sessionStorage.setItem('__MULTIPAGE_SOURCE', injectedSource);
         },
         args: [options.injectSource],
       });
@@ -1520,6 +1525,25 @@ async function handleMessage(message, sender) {
       clearStopRequest();
       const result = await deleteUsedIcloudAliases();
       return { ok: true, ...result };
+    }
+
+    case 'SET_OAUTH_QUEUE': {
+      clearStopRequest();
+      const queue = message.payload.oauthQueue || [];
+      await setState({ oauthQueue: queue });
+      return { ok: true };
+    }
+
+    case 'START_AUTO_OAUTH': {
+      clearStopRequest();
+      autoOauthLoop(); // fire-and-forget
+      return { ok: true };
+    }
+
+    case 'STOP_AUTO_OAUTH': {
+      await requestStop();
+      await setState({ autoOauthActive: false });
+      return { ok: true };
     }
 
     case 'STOP_FLOW': {
@@ -2088,6 +2112,102 @@ async function autoRunLoop(totalRuns, options = {}) {
   autoRunActive = false;
   autoRunPausedPhase = null;
   await syncAutoRunState({ autoRunning: false, autoRunPausedPhase: null });
+  clearStopRequest();
+}
+
+async function markAccountOauthCompleted(email) {
+  const state = await getPersistentAliasState();
+  const accounts = state.accounts || [];
+  let found = false;
+  for (const a of accounts) {
+      if (a.email === email) {
+          a.is_oauth_completed = true;
+          found = true;
+          break;
+      }
+  }
+  if (!found) {
+      accounts.push({ email: email, password: '', is_oauth_completed: true, createdAt: Date.now() });
+  }
+  await chrome.storage.local.set({ accounts });
+  await setState({ accounts });
+}
+
+async function autoOauthLoop() {
+  const state = await getState();
+  if (state.autoOauthActive || state.autoRunning) {
+    await addLog('Auto run already in progress', 'warn');
+    return;
+  }
+
+  clearStopRequest();
+  await setState({ autoOauthActive: true });
+
+  let queue = state.oauthQueue || [];
+  let totalInQueue = queue.length;
+
+  for (let run = 1; run <= totalInQueue; run++) {
+    const currentState = await getState();
+    let currentQueue = currentState.oauthQueue || [];
+    if (currentQueue.length === 0) break;
+    
+    const acc = currentQueue[0];
+    
+    const prev = await getState();
+    const keepSettings = {
+      vpsUrl: prev.vpsUrl,
+      mailProvider: prev.mailProvider,
+      inbucketHost: prev.inbucketHost,
+      inbucketMailbox: prev.inbucketMailbox,
+      autoOauthActive: true,
+      oauthQueue: currentQueue,
+      email: acc.email,
+      password: acc.password,
+    };
+    await resetState();
+    await setState(keepSettings);
+    
+    chrome.runtime.sendMessage({ type: 'AUTO_RUN_RESET' }).catch(() => {});
+    await sleepWithStop(500);
+
+    try {
+      throwIfStopped();
+      await addLog(`=== [OAuth Mode] Run ${run}/${totalInQueue} for ${acc.email} ===`, 'info');
+
+      await executeStepAndWait(1, getAutoStepDelay(1));
+      await executeStepAndWait(6, getAutoStepDelay(6));
+      await executeStepAndWait(7, getAutoStepDelay(7));
+      await executeStepAndWait(8, getAutoStepDelay(8));
+      await executeStepAndWait(9, getAutoStepDelay(9));
+
+      await markAccountOauthCompleted(acc.email);
+      
+      await addLog(`=== [OAuth Run] ${run}/${totalInQueue} COMPLETE! ===`, 'ok');
+
+      const latestState = await getState();
+      let updatedQueue = latestState.oauthQueue || [];
+      if (updatedQueue.length > 0 && updatedQueue[0].email === acc.email) {
+          updatedQueue.shift();
+          await setState({ oauthQueue: updatedQueue });
+      }
+
+    } catch (err) {
+      if (isStopError(err)) {
+        await addLog(`[OAuth Mode] Run ${run}/${totalInQueue} stopped by user`, 'warn');
+      } else {
+        await setState({ autoOauthActive: false });
+        await addLog(`[OAuth Mode] Run ${run}/${totalInQueue} failed: ${err.message}`, 'error');
+        clearStopRequest();
+        return;
+      }
+      break; 
+    }
+    
+    await sleepWithStop(3000);
+  }
+
+  await addLog(`=== Auto OAuth loop finished ===`, 'ok');
+  await setState({ autoOauthActive: false });
   clearStopRequest();
 }
 
@@ -3062,6 +3182,7 @@ async function executeStep9(state) {
       target: { tabId },
       func: (injectedSource) => {
         window.__MULTIPAGE_SOURCE = injectedSource;
+        sessionStorage.setItem('__MULTIPAGE_SOURCE', injectedSource);
       },
       args: [authPanel.injectSource],
     });

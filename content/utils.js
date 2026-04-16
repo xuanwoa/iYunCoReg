@@ -2,6 +2,10 @@
 
 const SCRIPT_SOURCE = (() => {
   if (window.__MULTIPAGE_SOURCE) return window.__MULTIPAGE_SOURCE;
+  try {
+    const sessionSource = sessionStorage.getItem('__MULTIPAGE_SOURCE');
+    if (sessionSource) return sessionSource;
+  } catch(e) {}
   const url = location.href;
   if (url.includes('chatgpt.com') || url.includes('auth0.openai.com') || url.includes('auth.openai.com') || url.includes('accounts.openai.com')) return 'signup-page';
   if (url.includes('mail.qq.com') || url.includes('exmail.qq.com')) return 'qq-mail';

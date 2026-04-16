@@ -69,6 +69,11 @@ const mailLoginHelpText = document.getElementById('mail-login-help-text');
 const btnMailLoginDone = document.getElementById('btn-mail-login-done');
 const inputRunCount = document.getElementById('input-run-count');
 const autoHint = document.getElementById('auto-hint');
+const btnExportVaultwarden = document.getElementById('btn-export-vaultwarden');
+const btnImportVaultwarden = document.getElementById('btn-import-vaultwarden');
+const inputCsvImport = document.getElementById('input-csv-import');
+const btnAutoOauth = document.getElementById('btn-auto-oauth');
+const displayOauthQueue = document.getElementById('display-oauth-queue');
 let icloudRefreshQueued = false;
 let currentLanguage = localStorage.getItem('multipage-language') || 'zh-CN';
 let lastKnownState = null;
@@ -120,6 +125,11 @@ const I18N = {
     labelPassword: '密码',
     labelOauth: 'OAuth',
     labelCallback: '回调',
+    labelExport: '导出',
+    btnExportVaultwarden: 'Vaultwarden CSV',
+    btnImportVaultwarden: '导入 CSV',
+    labelOauthQueue: '待跑队列',
+    btnAutoOauth: '自动 OAuth 授权',
     icloudAliasName: 'iCloud Hide My Email',
     icloudHostAuto: '自动',
     icloudHostCom: 'iCloud.com',
@@ -279,6 +289,11 @@ const I18N = {
     labelPassword: 'Password',
     labelOauth: 'OAuth',
     labelCallback: 'Callback',
+    labelExport: 'Export',
+    btnExportVaultwarden: 'Vaultwarden CSV',
+    btnImportVaultwarden: 'Import CSV',
+    labelOauthQueue: 'Queued',
+    btnAutoOauth: 'Auto OAuth Mode',
     icloudAliasName: 'iCloud Hide My Email',
     icloudHostAuto: 'Auto',
     icloudHostCom: 'iCloud.com',
@@ -644,6 +659,16 @@ async function restoreState() {
     }
     if (state.inbucketMailbox) {
       inputInbucketMailbox.value = state.inbucketMailbox;
+    }
+    if (state.oauthQueue) {
+      displayOauthQueue.textContent = state.oauthQueue.length;
+    }
+    if (state.autoOauthActive) {
+      btnAutoOauth.textContent = currentLanguage === 'zh-CN' ? '停止自动 OAuth' : 'Stop Auto OAuth';
+      btnAutoOauth.classList.replace('btn-primary', 'btn-danger');
+    } else {
+      btnAutoOauth.textContent = currentLanguage === 'zh-CN' ? '自动 OAuth 授权' : 'Auto OAuth Mode';
+      btnAutoOauth.classList.replace('btn-danger', 'btn-primary');
     }
 
     if (state.stepStatuses) {
@@ -1339,6 +1364,123 @@ btnCopyPassword.addEventListener('click', async () => {
 btnPasteVpsUrl.addEventListener('click', async () => {
   await pasteCpaAuthFromClipboard();
 });
+
+if (btnExportVaultwarden) {
+  btnExportVaultwarden.addEventListener('click', async () => {
+    try {
+      const state = await chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' });
+      const accounts = state.accounts || [];
+      if (!accounts.length) {
+        showToast(currentLanguage === 'zh-CN' ? '没有可导出的账号' : 'No accounts to export', 'warn');
+        return;
+      }
+      let csvContent = 'folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\n';
+      for (const acc of accounts) {
+        if (!acc.email) continue;
+        const uri = 'https://chatgpt.com'; 
+        const oauthVal = acc.is_oauth_completed ? '"is_oauth_completed:true"' : '"is_oauth_completed:false"';
+        const row = [
+          '', 0, 'login', `iYunCoReg ${acc.email}`, '', oauthVal, 0, uri, acc.email, acc.password || '', ''
+        ].join(',');
+        csvContent += row + '\n';
+      }
+      const blob = new Blob([csvContent], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `vaultwarden_export_${new Date().getTime()}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(currentLanguage === 'zh-CN' ? 'CSV 导出成功' : 'Exported Vaultwarden CSV', 'success');
+    } catch (err) {
+      showToast(currentLanguage === 'zh-CN' ? `导出失败: ${err.message}` : `Export failed: ${err.message}`, 'error');
+    }
+  });
+
+  if (btnImportVaultwarden) {
+    btnImportVaultwarden.addEventListener('click', () => inputCsvImport.click());
+    inputCsvImport.addEventListener('change', async (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const text = await file.text();
+      const lines = text.split('\n');
+      if (lines.length <= 1) return;
+
+      const headers = lines[0].toLowerCase().split(',');
+      const userIndex = headers.indexOf('login_username');
+      const passIndex = headers.indexOf('login_password');
+      const fieldsIndex = headers.indexOf('fields');
+
+      if (userIndex === -1 || fieldsIndex === -1) {
+        showToast(currentLanguage === 'zh-CN' ? 'CSV格式不支持' : 'Unsupported CSV format', 'error');
+        return;
+      }
+
+      const oauthQueue = [];
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if(!line) continue;
+        
+        let cols = [];
+        let cur = '';
+        let inQuotes = false;
+        
+        for (let j = 0; j < line.length; j++) {
+            if (line[j] === '"') inQuotes = !inQuotes;
+            else if (line[j] === ',' && !inQuotes) { cols.push(cur); cur = ''; }
+            else cur += line[j];
+        }
+        cols.push(cur);
+        
+        const username = cols[userIndex]?.replace(/^"|"$/g, '').trim();
+        const password = cols[passIndex]?.replace(/^"|"$/g, '').trim();
+        const fields = cols[fieldsIndex] || '';
+        if (username && fields.includes('is_oauth_completed:false')) {
+            oauthQueue.push({ email: username, password });
+        }
+      }
+
+      if (oauthQueue.length === 0) {
+        showToast(currentLanguage === 'zh-CN' ? '没有扫描到未授权帐号' : 'No incomplete OAuth accounts found', 'warn');
+        return;
+      }
+
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'SET_OAUTH_QUEUE',
+          source: 'sidepanel',
+          payload: { oauthQueue }
+        });
+        if (response?.error) throw new Error(response.error);
+        showToast(currentLanguage === 'zh-CN' ? `成功导入 ${oauthQueue.length} 个帐号` : `Imported ${oauthQueue.length} accounts`, 'success');
+        displayOauthQueue.textContent = oauthQueue.length;
+      } catch(err) {
+        showToast(`Import failed: ${err.message}`, 'error');
+      }
+      inputCsvImport.value = '';
+    });
+  }
+
+  if (btnAutoOauth) {
+    btnAutoOauth.addEventListener('click', async () => {
+      try {
+        const state = await chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'sidepanel' });
+        if (!state.oauthQueue || state.oauthQueue.length === 0) {
+          showToast(currentLanguage === 'zh-CN' ? '队列为空，请先导入' : 'OAuth Queue empty', 'warn');
+          return;
+        }
+        if (state.autoOauthActive) {
+          await chrome.runtime.sendMessage({ type: 'STOP_AUTO_OAUTH', source: 'sidepanel' });
+        } else {
+          await chrome.runtime.sendMessage({ type: 'START_AUTO_OAUTH', source: 'sidepanel' });
+        }
+      } catch(err) {
+        showToast(err.message, 'error');
+      }
+    });
+  }
+}
 
 btnIcloudRefresh.addEventListener('click', async () => {
   await refreshIcloudAliases();

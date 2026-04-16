@@ -110,14 +110,14 @@
       <div class="data-row" id="row-mail-poll-config">
         <span class="data-label" data-i18n="labelMailWait">Poll</span>
         <div class="data-inline">
-          <input type="number" id="input-mail-poll-attempts" class="data-input" min="1" max="120" placeholder="20" data-i18n-placeholder="placeholderMailPollAttempts" />
-          <input type="number" id="input-mail-poll-interval" class="data-input" min="1" max="30" placeholder="3" data-i18n-placeholder="placeholderMailPollInterval" />
+          <input type="number" id="input-mail-poll-attempts" class="data-input" min="1" max="120" value="24" placeholder="24" data-i18n-placeholder="placeholderMailPollAttempts" />
+          <input type="number" id="input-mail-poll-interval" class="data-input" min="1" max="30" value="3" placeholder="3" data-i18n-placeholder="placeholderMailPollInterval" />
         </div>
       </div>
       <div class="data-row" id="row-mail-resend-config">
         <span class="data-label" data-i18n="labelMailResend">Resend</span>
         <div class="data-inline">
-          <input type="number" id="input-mail-resend-rounds" class="data-input" min="1" max="10" placeholder="3" data-i18n-placeholder="placeholderMailResendRounds" />
+          <input type="number" id="input-mail-resend-rounds" class="data-input" min="1" max="10" value="2" placeholder="2" data-i18n-placeholder="placeholderMailResendRounds" />
         </div>
       </div>
       <div class="data-row" id="row-inbucket-host" style="display:none;">
@@ -156,8 +156,19 @@
         <span id="display-oauth-url" class="data-value mono truncate">Waiting...</span>
       </div>
       <div class="data-row">
-        <span class="data-label" data-i18n="labelCallback">Callback</span>
-        <span id="display-localhost-url" class="data-value mono truncate">Waiting...</span>
+        <span class="data-label" data-i18n="labelExport">Vaultwarden</span>
+        <div class="data-inline">
+          <input type="file" id="input-csv-import" accept=".csv" style="display:none;" />
+          <button id="btn-import-vaultwarden" class="btn btn-outline btn-sm" type="button" data-i18n="btnImportVaultwarden">Import CSV</button>
+          <button id="btn-export-vaultwarden" class="btn btn-outline btn-sm" type="button" data-i18n="btnExportVaultwarden">Export CSV</button>
+        </div>
+      </div>
+      <div class="data-row">
+        <span class="data-label" data-i18n="labelOauthQueue">Queued</span>
+        <div class="data-inline">
+          <span id="display-oauth-queue" class="data-value mono truncate">0</span>
+          <button id="btn-auto-oauth" class="btn btn-primary btn-sm" type="button" data-i18n="btnAutoOauth">Auto OAuth Mode</button>
+        </div>
       </div>
     </div>
     <div id="status-bar" class="status-bar">
