@@ -853,12 +853,8 @@ async function resetState() {
     icloudHostPreference: prev.icloudHostPreference || 'auto',
     preferredIcloudHost: prev.preferredIcloudHost || '',
     mailProvider: prev.mailProvider || '163',
-<<<<<<< HEAD
-    mailPollMaxAttempts: Number(prev.mailPollMaxAttempts) || 24,
-=======
     qqMailDomain: prev.qqMailDomain || 'standard',
-    mailPollMaxAttempts: Number(prev.mailPollMaxAttempts) || 20,
->>>>>>> upstream/main
+    mailPollMaxAttempts: Number(prev.mailPollMaxAttempts) || 24,
     mailPollIntervalMs: Number(prev.mailPollIntervalMs) || 3000,
     mailResendRounds: Number(prev.mailResendRounds) || 2,
     inbucketHost: prev.inbucketHost || '',
