@@ -3315,17 +3315,17 @@ async function executeStep8(state) {
     chrome.webNavigation.onBeforeNavigate.addListener(webNavListener);
 
     // After step 7, the auth page shows a consent screen ("使用 ChatGPT 登录到 Codex")
-    // with a "继续" button. We locate the button in-page, then click it through
-    // the debugger Input API directly.
+    // with a "继续" button. Primary path is an in-page click from content script.
+    // Debugger click is only a fallback when needed.
     (async () => {
       try {
         signupTabId = await getTabId('signup-page');
         if (signupTabId) {
           await chrome.tabs.update(signupTabId, { active: true });
-          await addLog('Step 8: Switched to auth page. Preparing debugger click...');
+          await addLog('Step 8: Switched to auth page. Preparing consent click...');
         } else {
           signupTabId = await reuseOrCreateTab('signup-page', state.oauthUrl);
-          await addLog('Step 8: Auth tab reopened. Preparing debugger click...');
+          await addLog('Step 8: Auth tab reopened. Preparing consent click...');
         }
 
         urlPollTimer = setInterval(() => {
@@ -3345,8 +3345,41 @@ async function executeStep8(state) {
         }
 
         if (!resolved) {
-          await clickWithDebugger(signupTabId, clickResult?.rect);
-          await addLog('Step 8: Debugger click dispatched, waiting for redirect...');
+          if (clickResult?.directClickLikelySucceeded) {
+            await addLog('Step 8: In-page consent click likely succeeded. Waiting for redirect...');
+            return;
+          }
+
+          if (state.debugFreeStepExecution) {
+            await addLog('Step 8: Debug-free mode enabled. Skipping debugger fallback and waiting for redirect...', 'warn');
+            return;
+          }
+
+          try {
+            await clickWithDebugger(signupTabId, clickResult?.rect);
+            await addLog('Step 8: Debugger fallback click dispatched, waiting for redirect...');
+          } catch (debugErr) {
+            await addLog(
+              `Step 8: Debugger fallback failed: ${getErrorMessage(debugErr)}. Will keep waiting for redirect and retry in-page click once.`,
+              'warn'
+            );
+
+            try {
+              const retryResult = await sendToContentScript('signup-page', {
+                type: 'STEP8_FIND_AND_CLICK',
+                source: 'background',
+                payload: {},
+              });
+
+              if (retryResult?.error) {
+                await addLog(`Step 8: In-page retry after debugger failure returned error: ${retryResult.error}`, 'warn');
+              } else {
+                await addLog('Step 8: In-page retry after debugger failure dispatched. Waiting for redirect...', 'warn');
+              }
+            } catch (retryErr) {
+              await addLog(`Step 8: Could not dispatch in-page retry after debugger failure: ${getErrorMessage(retryErr)}`, 'warn');
+            }
+          }
         }
       } catch (err) {
         cleanup();

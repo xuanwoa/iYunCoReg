@@ -692,11 +692,11 @@ function isElementVisible(el) {
 }
 
 // ============================================================
-// Step 8: Find "继续" on OAuth consent page for debugger click
+// Step 8: Click "继续" on OAuth consent page
 // ============================================================
 // After login + verification, page shows:
 // "使用 ChatGPT 登录到 Codex" with a "继续" submit button.
-// Background performs the actual click through the debugger Input API.
+// Primary path: click directly in-page. Background may still use debugger as fallback.
 
 async function step8_findAndClick() {
   await ensureAuthSurfaceReady(8);
@@ -721,12 +721,94 @@ async function step8_findAndClick() {
   await sleep(250);
 
   const rect = getSerializableRect(continueBtn);
-  log('Step 8: Found "继续" button and prepared debugger click coordinates.');
+  const beforeUrl = location.href;
+
+  await clickStep8ContinueButton(continueBtn);
+  const transition = await waitForStep8TransitionSignal(beforeUrl, 4500).catch(() => null);
+
+  if (transition) {
+    log(`Step 8: In-page consent click succeeded (${transition.type}: ${transition.value || ''}).`, 'ok');
+  } else {
+    log('Step 8: In-page consent click dispatched, waiting for redirect signal from background listener...', 'warn');
+  }
+
   return {
     rect,
     buttonText: (continueBtn.textContent || '').trim(),
+    beforeUrl,
     url: location.href,
+    directClickAttempted: true,
+    directClickLikelySucceeded: Boolean(transition),
+    transitionType: transition?.type || '',
+    transitionValue: transition?.value || '',
   };
+}
+
+async function clickStep8ContinueButton(button) {
+  if (!button) {
+    throw new Error('No consent button provided for step 8 click.');
+  }
+
+  const clickInit = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: window,
+    button: 0,
+    buttons: 1,
+    detail: 1,
+  };
+
+  try {
+    button.dispatchEvent(new PointerEvent('pointerdown', {
+      ...clickInit,
+      pointerId: 1,
+      pointerType: 'mouse',
+      isPrimary: true,
+    }));
+  } catch {}
+
+  button.dispatchEvent(new MouseEvent('mousedown', clickInit));
+  await sleep(60);
+
+  try {
+    button.dispatchEvent(new PointerEvent('pointerup', {
+      ...clickInit,
+      pointerId: 1,
+      pointerType: 'mouse',
+      isPrimary: true,
+    }));
+  } catch {}
+
+  button.dispatchEvent(new MouseEvent('mouseup', clickInit));
+  button.dispatchEvent(new MouseEvent('click', clickInit));
+
+  await sleep(120);
+  if (location.href && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
+    // Some consent pages only respond to HTMLElement.click() or delegated handlers.
+    button.click();
+  }
+}
+
+async function waitForStep8TransitionSignal(previousUrl, timeout = 4500) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    if (location.href !== previousUrl) {
+      return { type: 'url', value: location.href };
+    }
+
+    const pendingText = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+    if (/redirecting|正在重定向|授权中|authorizing|please wait/i.test(pendingText)) {
+      return { type: 'text', value: 'redirecting' };
+    }
+
+    await sleep(120);
+  }
+
+  return null;
 }
 
 function findStep8BlockingError() {
