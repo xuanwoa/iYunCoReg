@@ -1,6 +1,6 @@
 // content/utils.js — Shared utilities for all content scripts
 
-const SCRIPT_SOURCE = (() => {
+var SCRIPT_SOURCE = (() => {
   if (window.__MULTIPAGE_SOURCE) return window.__MULTIPAGE_SOURCE;
   try {
     const sessionSource = sessionStorage.getItem('__MULTIPAGE_SOURCE');
@@ -15,16 +15,19 @@ const SCRIPT_SOURCE = (() => {
   return 'vps-panel';
 })();
 
-const LOG_PREFIX = `[MultiPage:${SCRIPT_SOURCE}]`;
-const STOP_ERROR_MESSAGE = 'Flow stopped by user.';
-let flowStopped = false;
+var LOG_PREFIX = `[MultiPage:${SCRIPT_SOURCE}]`;
+var STOP_ERROR_MESSAGE = 'Flow stopped by user.';
+var flowStopped = false;
 
-chrome.runtime.onMessage.addListener((message) => {
-  if (message.type === 'STOP_FLOW') {
-    flowStopped = true;
-    console.warn(LOG_PREFIX, STOP_ERROR_MESSAGE);
-  }
-});
+if (!window._UTILS_INJECTED) {
+  window._UTILS_INJECTED = true;
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message.type === 'STOP_FLOW') {
+      flowStopped = true;
+      console.warn(LOG_PREFIX, STOP_ERROR_MESSAGE);
+    }
+  });
+}
 
 function resetStopState() {
   flowStopped = false;
@@ -376,7 +379,7 @@ async function humanPause(min = 250, max = 850) {
 
 // Auto-report ready on load
 // Skip ready signal from child iframes of mail pages to avoid overwriting the top frame's registration
-const _isMailChildFrame = (
+var _isMailChildFrame = (
   SCRIPT_SOURCE === 'qq-mail'
   || SCRIPT_SOURCE === 'mail-163'
   || SCRIPT_SOURCE === 'gmail-mail'

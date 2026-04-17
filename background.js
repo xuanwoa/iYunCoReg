@@ -1743,12 +1743,61 @@ async function executeStep(step) {
  */
 async function executeStepAndWait(step, delayAfter = 2000) {
   throwIfStopped();
-  const promise = waitForStepComplete(step, 120000);
-  await executeStep(step);
-  await promise;
-  // Extra delay for page transitions / DOM updates
-  if (delayAfter > 0) {
-    await sleepWithStop(delayAfter + Math.floor(Math.random() * 1200));
+
+  const policy = getStepRetryPolicy(step);
+  const maxAttempts = Math.max(1, Number(policy.maxRetries || 0) + 1);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    throwIfStopped();
+    const completionPromise = waitForStepComplete(step, 120000);
+
+    try {
+      await executeStep(step);
+      await completionPromise;
+      // Extra delay for page transitions / DOM updates
+      if (delayAfter > 0) {
+        await sleepWithStop(delayAfter + Math.floor(Math.random() * 1200));
+      }
+      return;
+    } catch (err) {
+      const errorMessage = getErrorMessage(err);
+      notifyStepError(step, errorMessage);
+
+      if (isStopError(err)) {
+        throw err;
+      }
+
+      const classified = classifyStepExecutionError(step, err);
+      const canRetryByType = classified.retryable
+        || (classified.category === 'unknown' && Boolean(policy.retryOnUnknown));
+      const retriesLeft = maxAttempts - attempt;
+
+      if (!canRetryByType || retriesLeft <= 0) {
+        await addLog(
+          `Step ${step}: escalating to manual intervention `
+            + `(category=${classified.category}, reason=${classified.reason}, `
+            + `attempt=${attempt}/${maxAttempts}): ${errorMessage}`,
+          'error'
+        );
+        throw buildRetryEscalationError(step, err, {
+          errorCategory: classified.category,
+          errorReason: classified.reason,
+          retryAttempt: attempt,
+          retryMaxAttempts: maxAttempts,
+          manualIntervention: classified.manualIntervention,
+        });
+      }
+
+      const retryDelayMs = getRetryDelayMs(policy, attempt);
+      await addLog(
+        `Step ${step}: auto-retry ${attempt}/${maxAttempts - 1} `
+          + `(category=${classified.category}, reason=${classified.reason}) `
+          + `after ${retryDelayMs}ms. Last error: ${errorMessage}`,
+        'warn'
+      );
+
+      await sleepWithStop(retryDelayMs);
+    }
   }
 }
 
@@ -1788,6 +1837,138 @@ function getAutoStepDelay(step) {
     9: 1000,
   };
   return delayMap[step] || 0;
+}
+
+const DEFAULT_STEP_RETRY_POLICY = {
+  maxRetries: 1,
+  baseDelayMs: 1800,
+  maxDelayMs: 12000,
+  retryJitterMs: 800,
+  retryOnUnknown: false,
+};
+
+const STEP_RETRY_POLICIES = {
+  1: { maxRetries: 1, retryOnUnknown: true },
+  2: { maxRetries: 1, retryOnUnknown: true },
+  3: { maxRetries: 0 }, // Step 3 has its own recovery and duplicate-submit risk
+  4: { maxRetries: 2 },
+  5: { maxRetries: 1 },
+  6: { maxRetries: 1 },
+  7: { maxRetries: 2 },
+  8: { maxRetries: 0 }, // Avoid duplicate consent click risk
+  9: { maxRetries: 0 }, // Avoid duplicate panel submit risk
+};
+
+function getStepRetryPolicy(step) {
+  return {
+    ...DEFAULT_STEP_RETRY_POLICY,
+    ...(STEP_RETRY_POLICIES[Number(step)] || {}),
+  };
+}
+
+function getRetryDelayMs(policy, failedAttemptIndex) {
+  const exponent = Math.max(0, Number(failedAttemptIndex) - 1);
+  const base = Number(policy.baseDelayMs) || DEFAULT_STEP_RETRY_POLICY.baseDelayMs;
+  const cap = Number(policy.maxDelayMs) || DEFAULT_STEP_RETRY_POLICY.maxDelayMs;
+  const jitter = Math.floor(Math.random() * ((Number(policy.retryJitterMs) || 0) + 1));
+  return Math.min(cap, base * (2 ** exponent)) + jitter;
+}
+
+function classifyStepExecutionError(step, error) {
+  if (isStopError(error)) {
+    return {
+      category: 'stopped',
+      reason: 'stopped-by-user',
+      retryable: false,
+      manualIntervention: false,
+    };
+  }
+
+  const message = getErrorMessage(error);
+  const lower = message.toLowerCase();
+
+  if (isIcloudLoginRequiredError(error) || isMailLoginRequiredError(error)
+    || lower.includes('sign in is required')
+    || lower.includes('please sign in')
+    || lower.includes('finish signing in')
+    || lower.includes('click "i\'ve signed in"')) {
+    return {
+      category: 'auth_required',
+      reason: 'login-required',
+      retryable: false,
+      manualIntervention: true,
+    };
+  }
+
+  if (
+    lower.includes('unknown step')
+    || lower.includes('no oauth url')
+    || lower.includes('no email')
+    || lower.includes('no email address')
+    || lower.includes('no localhost url')
+    || lower.includes('no auth panel url')
+    || lower.includes('inbucket host is empty or invalid')
+    || lower.includes('inbucket mailbox name is empty')
+  ) {
+    return {
+      category: 'structural',
+      reason: 'missing-prerequisite-or-config',
+      retryable: false,
+      manualIntervention: true,
+    };
+  }
+
+  if (
+    lower.includes('timed out')
+    || lower.includes('timeout waiting')
+    || lower.includes('did not respond')
+    || lower.includes('message channel is closed')
+    || lower.includes('message port closed')
+    || lower.includes('before a response was received')
+    || lower.includes('receiving end does not exist')
+    || lower.includes('could not establish connection')
+    || lower.includes('tab was closed')
+    || lower.includes('surface wait failed')
+    || lower.includes('operation timed out')
+  ) {
+    return {
+      category: 'transient',
+      reason: 'timing-or-transport-instability',
+      retryable: true,
+      manualIntervention: false,
+    };
+  }
+
+  if ((step === 3 || step === 8 || step === 9)
+    && (lower.includes('operation timed out')
+      || lower.includes('localhost redirect not captured')
+      || lower.includes('invalid code')
+      || lower.includes('verification code was rejected'))) {
+    return {
+      category: 'duplicate_risk',
+      reason: 'high-side-effect-step-needs-manual-check',
+      retryable: false,
+      manualIntervention: true,
+    };
+  }
+
+  return {
+    category: 'unknown',
+    reason: 'unclassified',
+    retryable: false,
+    manualIntervention: true,
+  };
+}
+
+function buildRetryEscalationError(step, originalError, context = {}) {
+  const wrapped = new Error(getErrorMessage(originalError));
+  wrapped.step = Number(step);
+  wrapped.errorCategory = context.errorCategory || 'unknown';
+  wrapped.errorReason = context.errorReason || 'unclassified';
+  wrapped.retryAttempt = Number(context.retryAttempt || 1);
+  wrapped.retryMaxAttempts = Number(context.retryMaxAttempts || 1);
+  wrapped.manualIntervention = Boolean(context.manualIntervention);
+  return wrapped;
 }
 
 async function waitForSignupSurface(payload, timeout = 20000) {
@@ -2110,10 +2291,21 @@ async function autoRunLoop(totalRuns, options = {}) {
         await addLog(`Run ${run}/${totalRuns} stopped by user`, 'warn');
         chrome.runtime.sendMessage(getAutoRunStatusMessage('stopped', run, totalRuns)).catch(() => {});
       } else {
+        const errorCategory = String(err?.errorCategory || 'unknown');
+        const errorReason = String(err?.errorReason || 'unclassified');
+        const retryAttempt = Number(err?.retryAttempt || 1);
+        const retryMaxAttempts = Number(err?.retryMaxAttempts || 1);
+        const manualIntervention = Boolean(err?.manualIntervention);
+
         autoRunPausedPhase = 'error';
         autoRunActive = false;
         await syncAutoRunState({ autoRunning: false });
-        await addLog(`Run ${run}/${totalRuns} failed: ${err.message}`, 'error');
+        await addLog(
+          `Run ${run}/${totalRuns} failed: ${err.message} `
+            + `[category=${errorCategory}, reason=${errorReason}, `
+            + `attempt=${retryAttempt}/${retryMaxAttempts}, manual=${manualIntervention}]`,
+          'error'
+        );
         chrome.runtime.sendMessage(getAutoRunStatusMessage('error', run, totalRuns)).catch(() => {});
         clearStopRequest();
         return;

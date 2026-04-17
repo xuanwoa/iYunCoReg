@@ -25,39 +25,43 @@
 
 console.log('[MultiPage:vps-panel] Content script loaded on', location.href);
 
-// Listen for commands from Background
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'EXECUTE_STEP') {
-    resetStopState();
-    handleStep(message.step, message.payload).then(() => {
-      sendResponse({ ok: true });
-    }).catch(err => {
-      if (isStopError(err)) {
-        log(`Step ${message.step}: Stopped by user.`, 'warn');
-        sendResponse({ stopped: true, error: err.message });
-        return;
-      }
-      reportError(message.step, err.message);
-      sendResponse({ error: err.message });
-    });
-    return true;
-  }
+if (!window._VPS_PANEL_INJECTED) {
+  window._VPS_PANEL_INJECTED = true;
 
-  if (message.type === 'CHECK_OAUTH_TIMEOUT_STATUS') {
-    resetStopState();
-    Promise.resolve()
-      .then(() => checkOauthTimeoutStatus())
-      .then(result => sendResponse({ ok: true, ...result }))
-      .catch(err => {
+  // Listen for commands from Background
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.type === 'EXECUTE_STEP') {
+      resetStopState();
+      handleStep(message.step, message.payload).then(() => {
+        sendResponse({ ok: true });
+      }).catch(err => {
         if (isStopError(err)) {
+          log(`Step ${message.step}: Stopped by user.`, 'warn');
           sendResponse({ stopped: true, error: err.message });
           return;
         }
+        reportError(message.step, err.message);
         sendResponse({ error: err.message });
       });
-    return true;
-  }
-});
+      return true;
+    }
+
+    if (message.type === 'CHECK_OAUTH_TIMEOUT_STATUS') {
+      resetStopState();
+      Promise.resolve()
+        .then(() => checkOauthTimeoutStatus())
+        .then(result => sendResponse({ ok: true, ...result }))
+        .catch(err => {
+          if (isStopError(err)) {
+            sendResponse({ stopped: true, error: err.message });
+            return;
+          }
+          sendResponse({ error: err.message });
+        });
+      return true;
+    }
+  });
+}
 
 async function handleStep(step, payload) {
   switch (step) {
