@@ -70,6 +70,7 @@ const btnMailLoginDone = document.getElementById('btn-mail-login-done');
 const inputRunCount = document.getElementById('input-run-count');
 const autoHint = document.getElementById('auto-hint');
 const btnExportVaultwarden = document.getElementById('btn-export-vaultwarden');
+const btnExportIcloudAliases = document.getElementById('btn-export-icloud-aliases');
 const btnImportVaultwarden = document.getElementById('btn-import-vaultwarden');
 const inputCsvImport = document.getElementById('input-csv-import');
 const btnAutoOauth = document.getElementById('btn-auto-oauth');
@@ -127,7 +128,11 @@ const I18N = {
     labelCallback: '回调',
     labelExport: '导出',
     btnExportVaultwarden: 'Vaultwarden CSV',
+    btnExportIcloudAliases: 'iCloud Alias CSV',
     btnImportVaultwarden: '导入 CSV',
+    noIcloudAliasesToExport: '没有可导出的 iCloud 别名',
+    exportIcloudAliasesSuccess: ({ count }) => `已导出 ${count} 个 iCloud 别名`,
+    exportIcloudAliasesFailed: ({ message }) => `导出 iCloud 别名失败：${message}`,
     labelOauthQueue: '待跑队列',
     btnAutoOauth: '自动 OAuth 授权',
     icloudAliasName: 'iCloud Hide My Email',
@@ -291,7 +296,11 @@ const I18N = {
     labelCallback: 'Callback',
     labelExport: 'Export',
     btnExportVaultwarden: 'Vaultwarden CSV',
+    btnExportIcloudAliases: 'iCloud Alias CSV',
     btnImportVaultwarden: 'Import CSV',
+    noIcloudAliasesToExport: 'No iCloud aliases to export',
+    exportIcloudAliasesSuccess: ({ count }) => `Exported ${count} iCloud aliases`,
+    exportIcloudAliasesFailed: ({ message }) => `Failed to export iCloud aliases: ${message}`,
     labelOauthQueue: 'Queued',
     btnAutoOauth: 'Auto OAuth Mode',
     icloudAliasName: 'iCloud Hide My Email',
@@ -881,6 +890,11 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+function toCsvCell(value) {
+  const text = value == null ? '' : String(value);
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
 function normalizeIcloudSearchText(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -1364,6 +1378,46 @@ btnCopyPassword.addEventListener('click', async () => {
 btnPasteVpsUrl.addEventListener('click', async () => {
   await pasteCpaAuthFromClipboard();
 });
+
+if (btnExportIcloudAliases) {
+  btnExportIcloudAliases.addEventListener('click', async () => {
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'LIST_ICLOUD_ALIASES',
+        source: 'sidepanel',
+        payload: {},
+      });
+      if (response?.error) throw new Error(response.error);
+
+      const aliases = Array.isArray(response?.aliases) ? response.aliases : [];
+      if (!aliases.length) {
+        showToast(t('noIcloudAliasesToExport'), 'warn');
+        return;
+      }
+
+      const lines = aliases
+        .map(alias => String(alias?.email || '').trim())
+        .filter(Boolean);
+
+      if (!lines.length) {
+        showToast(t('noIcloudAliasesToExport'), 'warn');
+        return;
+      }
+
+      const csvContent = `${lines.join('\n')}\n`;
+      const blob = new Blob([csvContent], { type: 'text/plain;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `icloud_aliases_export_${Date.now()}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(t('exportIcloudAliasesSuccess', { count: aliases.length }), 'success');
+    } catch (err) {
+      showToast(t('exportIcloudAliasesFailed', { message: err.message || err }), 'error');
+    }
+  });
+}
 
 if (btnExportVaultwarden) {
   btnExportVaultwarden.addEventListener('click', async () => {

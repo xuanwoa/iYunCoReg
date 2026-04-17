@@ -38,6 +38,7 @@
   - 查看
   - 手动删除
   - 批量删除已用 alias
+  - 导出 alias 列表（CSV）
   - 用完自动删除
 
 ## 使用前准备
@@ -176,6 +177,20 @@ Sub2API: https://<your-host>/admin/accounts
 - 留空：自动生成强密码
 - 手动填写：使用自定义密码
 - 可通过 `Show / Hide` 切换显示
+
+### `Export`
+
+- `Vaultwarden CSV`：导出插件内账号（兼容 Vaultwarden / Bitwarden 导入字段）
+- `iCloud Alias CSV`：导出当前 iCloud Hide My Email 别名邮箱列表（每行一个邮箱）
+
+`iCloud Alias CSV` 导出格式：
+
+- 每行仅保留一个邮箱地址，例如：`zenith-best3x@icloud.com`
+
+说明：
+
+- 导出数据来源于当前 iCloud 会话下的 `LIST_ICLOUD_ALIASES` 结果
+- 仅导出 Hide My Email alias 邮箱地址，不包含 iCloud Mail 收件箱/邮件正文
 
 ## 工作流
 
