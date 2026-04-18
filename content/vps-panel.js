@@ -23,13 +23,39 @@
 //   </div>
 // </div>
 
+const VPS_PANEL_GUARD_KEY = '__MULTIPAGE_VPS_PANEL_INITIALIZED';
+const VPS_PANEL_RUNTIME_KEY = '__MULTIPAGE_VPS_PANEL_RUNTIME';
+const vpsPanelRuntime = window[VPS_PANEL_RUNTIME_KEY] = window[VPS_PANEL_RUNTIME_KEY] || { activeTasks: {} };
+
+function runExclusiveTask(taskKey, taskFactory) {
+  if (vpsPanelRuntime.activeTasks[taskKey]) {
+    log(`Reusing in-flight task for ${taskKey} to avoid duplicate execution.`);
+    return vpsPanelRuntime.activeTasks[taskKey];
+  }
+
+  const task = Promise.resolve().then(taskFactory);
+  vpsPanelRuntime.activeTasks[taskKey] = task.finally(() => {
+    if (vpsPanelRuntime.activeTasks[taskKey] === task) {
+      delete vpsPanelRuntime.activeTasks[taskKey];
+    }
+  });
+
+  return vpsPanelRuntime.activeTasks[taskKey];
+}
+
+if (window[VPS_PANEL_GUARD_KEY]) {
+  console.log('[MultiPage:vps-panel] Already initialized on', location.href);
+} else {
+window[VPS_PANEL_GUARD_KEY] = true;
 console.log('[MultiPage:vps-panel] Content script loaded on', location.href);
 
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'EXECUTE_STEP') {
-    resetStopState();
-    handleStep(message.step, message.payload).then(() => {
+    runExclusiveTask(`step:${message.step}`, async () => {
+      resetStopState();
+      await handleStep(message.step, message.payload);
+    }).then(() => {
       sendResponse({ ok: true });
     }).catch(err => {
       if (isStopError(err)) {
@@ -44,17 +70,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'CHECK_OAUTH_TIMEOUT_STATUS') {
-    resetStopState();
-    Promise.resolve()
-      .then(() => checkOauthTimeoutStatus())
-      .then(result => sendResponse({ ok: true, ...result }))
-      .catch(err => {
-        if (isStopError(err)) {
-          sendResponse({ stopped: true, error: err.message });
-          return;
-        }
-        sendResponse({ error: err.message });
-      });
+    runExclusiveTask('check-oauth-timeout-status', async () => {
+      resetStopState();
+      return checkOauthTimeoutStatus();
+    }).then(result => {
+      sendResponse({ ok: true, ...result });
+    }).catch(err => {
+      if (isStopError(err)) {
+        sendResponse({ stopped: true, error: err.message });
+        return;
+      }
+      sendResponse({ error: err.message });
+    });
     return true;
   }
 });
@@ -118,6 +145,7 @@ function getCodexOauthVerificationState() {
   const statusNode = findCodexOauthStatusNode(card);
   const statusText = normalizeText(statusNode?.textContent || '');
   const callbackSection = card?.querySelector('[class*="callbackSection"]') || card;
+  const callbackText = normalizeText(callbackSection?.textContent || '');
   const errorCandidates = callbackSection
     ? callbackSection.querySelectorAll([
       '[role="alert"]',
@@ -138,20 +166,22 @@ function getCodexOauthVerificationState() {
     }
   }
 
-  const success = /(?:认证成功|授权成功|认证完成|authentication success(?:ful)?|authorization success|authenticated|authorized)/i.test(statusText);
-  const waiting = /(?:等待认证中|waiting for auth|waiting for authentication|processing|处理中)/i.test(statusText);
+  const statusContext = normalizeText([statusText, callbackText].filter(Boolean).join(' '));
+  const success = /(?:认证成功|授权成功|认证完成|authentication success(?:ful)?|authorization success|authenticated|authorized)/i.test(statusContext);
+  const waiting = /(?:等待认证中|waiting for auth|waiting for authentication|continue waiting for authentication|callback url submitted|callback submitted|processing|处理中)/i.test(statusContext);
   const failure = !success && (
-    /(?:认证失败|授权失败|提交失败|回调失败|authentication failed|authorization failed|invalid callback|callback invalid|callback failed|失败|failed)/i.test(statusText)
+    /(?:认证失败|授权失败|提交失败|回调失败|authentication failed|authorization failed|invalid callback|callback invalid|callback failed|失败|failed)/i.test(statusContext)
     || Boolean(errorText)
   );
 
   return {
     statusText,
     errorText,
+    callbackText,
     success,
     waiting,
     failure,
-    message: errorText || statusText || '',
+    message: errorText || statusText || callbackText || '',
   };
 }
 
@@ -362,6 +392,15 @@ async function step9_vpsVerify(payload) {
     }
   }
 
+  const currentInputValue = String(urlInput.value || urlInput.getAttribute('value') || '').trim();
+  if (initialVerificationState.waiting && currentInputValue === localhostUrl) {
+    log(`Step 9: Callback already submitted and waiting for authentication. Skipping duplicate submit. ${initialVerificationState.message || ''}`.trim(), 'ok');
+    const result = await waitForCodexOauthVerificationResult(initialVerificationState, 30000);
+    log(`Step 9: Authentication successful! ${result.message || ''}`.trim(), 'ok');
+    reportComplete(9);
+    return;
+  }
+
   await humanPause(600, 1500);
   fillInput(urlInput, localhostUrl);
   log(`Step 9: Filled callback URL: ${localhostUrl.slice(0, 80)}...`);
@@ -392,3 +431,5 @@ async function step9_vpsVerify(payload) {
 
   reportComplete(9);
 }
+
+} // end singleton guard
