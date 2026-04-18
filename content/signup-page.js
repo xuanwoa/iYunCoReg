@@ -585,16 +585,6 @@ async function waitForLoginNextAction(options = {}) {
   while (Date.now() - start < timeout) {
     throwIfStopped();
 
-    const passwordlessButton = findVisiblePasswordlessLoginButton();
-    if (passwordlessButton) {
-      return { type: 'passwordless', button: passwordlessButton };
-    }
-
-    const codeInput = findVisibleVerificationCodeInput();
-    if (codeInput) {
-      return { type: 'code', input: codeInput };
-    }
-
     const passwordInput = findVisiblePasswordInput();
     if (passwordInput) {
       if (!preferPasswordlessLogin) {
@@ -604,6 +594,16 @@ async function waitForLoginNextAction(options = {}) {
       if (!passwordCandidate) {
         passwordCandidate = passwordInput;
       }
+    }
+
+    const passwordlessButton = findVisiblePasswordlessLoginButton();
+    if (passwordlessButton) {
+      return { type: 'passwordless', button: passwordlessButton };
+    }
+
+    const codeInput = findVisibleVerificationCodeInput();
+    if (codeInput) {
+      return { type: 'code', input: codeInput };
     }
 
     await sleep(250);
