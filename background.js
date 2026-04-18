@@ -1839,6 +1839,96 @@ function getAutoStepDelay(step) {
   return delayMap[step] || 0;
 }
 
+const STEP8_BACKTRACK_TO_STEP6_MAX_RETRIES = 1;
+
+function shouldRetryStep8FromStep6(error) {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes('localhost redirect not captured')
+    || message.includes('step 8 click may have been blocked')
+    || message.includes('timed out')
+    || message.includes('timeout waiting')
+    || message.includes('did not respond')
+    || message.includes('message channel is closed')
+    || message.includes('message port closed')
+    || message.includes('before a response was received')
+    || message.includes('receiving end does not exist')
+    || message.includes('could not establish connection')
+    || message.includes('tab was closed')
+    || message.includes('surface wait failed')
+    || message.includes('operation timed out');
+}
+
+async function resetStepStatusesToPending(steps = []) {
+  if (!Array.isArray(steps) || steps.length === 0) return;
+
+  const state = await getState();
+  const statuses = { ...(state.stepStatuses || {}) };
+  const changedSteps = [];
+
+  for (const step of steps) {
+    const stepNum = Number(step);
+    if (!Number.isInteger(stepNum) || stepNum < 1 || stepNum > 9) continue;
+    if (statuses[stepNum] !== 'pending') {
+      statuses[stepNum] = 'pending';
+      changedSteps.push(stepNum);
+    }
+  }
+
+  if (changedSteps.length === 0) return;
+
+  await setState({ stepStatuses: statuses });
+  for (const stepNum of changedSteps) {
+    chrome.runtime.sendMessage({
+      type: 'STEP_STATUS_CHANGED',
+      payload: { step: stepNum, status: 'pending' },
+    }).catch(() => {});
+  }
+}
+
+async function executeStep6To9WithStep8Recovery(startStep = 6, options = {}) {
+  const initialStartStep = Math.max(6, Number(startStep) || 6);
+  if (initialStartStep > 9) return;
+
+  const maxBacktracks = Math.max(0, Number(options.maxBacktracks ?? STEP8_BACKTRACK_TO_STEP6_MAX_RETRIES));
+  const runLabel = options.runLabel ? `${options.runLabel} ` : '';
+  let backtrackAttempts = 0;
+  let currentStartStep = initialStartStep;
+
+  recoveryLoop:
+  while (true) {
+    for (let step = currentStartStep; step <= 9; step++) {
+      const currentState = await getState();
+      const stepStatus = currentState.stepStatuses?.[step];
+      if (stepStatus === 'completed' || stepStatus === 'skipped') continue;
+
+      try {
+        await executeStepAndWait(step, getAutoStepDelay(step));
+      } catch (err) {
+        if (step === 8
+          && shouldRetryStep8FromStep6(err)
+          && backtrackAttempts < maxBacktracks) {
+          backtrackAttempts += 1;
+
+          await addLog(
+            `${runLabel}Step 8 stalled. Rewinding to step 6 and retrying steps 6-9 `
+              + `(${backtrackAttempts}/${maxBacktracks})...`,
+            'warn'
+          );
+
+          await setState({ localhostUrl: null });
+          await resetStepStatusesToPending([6, 7, 8, 9]);
+          currentStartStep = 6;
+          continue recoveryLoop;
+        }
+
+        throw err;
+      }
+    }
+
+    return;
+  }
+}
+
 const DEFAULT_STEP_RETRY_POLICY = {
   maxRetries: 1,
   baseDelayMs: 1800,
@@ -2033,8 +2123,43 @@ const STEP3_POST_SIGNUP_SELECTORS = [
   'input[name="age"]',
 ];
 
+const STEP4_CODE_SELECTORS = [
+  'input[name="code"]',
+  'input[name="otp"]',
+  'input[type="text"][maxlength="6"]',
+  'input[maxlength="1"]',
+  'input[aria-label*="code" i]',
+  'input[placeholder*="code" i]',
+  'input[inputmode="numeric"]',
+];
+
+const STEP4_PROFILE_SELECTORS = [
+  'input[name="name"]',
+  'input[placeholder*="全名"]',
+  'input[placeholder*="full name" i]',
+  '[role="spinbutton"][data-type="year"]',
+  'input[name="birthday"]',
+  'input[name="age"]',
+];
+
 function isStep3PasswordSurface(selector = '') {
   return STEP3_PASSWORD_SELECTORS.includes(selector);
+}
+
+function isStep4ProfileSurface(selector = '') {
+  return STEP4_PROFILE_SELECTORS.includes(selector);
+}
+
+async function detectStep4PreSurface(timeout = 5000) {
+  try {
+    return await waitForSignupSurface({
+      step: '4-precheck',
+      timeout,
+      selectors: [...STEP4_CODE_SELECTORS, ...STEP4_PROFILE_SELECTORS],
+    }, timeout + 1500);
+  } catch {
+    return null;
+  }
 }
 
 async function completeStepFromBackground(step, payload = {}) {
@@ -2228,6 +2353,13 @@ async function executeAutoRunSteps(run, totalRuns, options = {}) {
   }
 
   for (let step = Math.max(3, startStep); step <= 9; step++) {
+    if (step >= 6) {
+      await executeStep6To9WithStep8Recovery(step, {
+        runLabel: `Run ${run}/${totalRuns} —`,
+      });
+      break;
+    }
+
     const currentState = await getState();
     const stepStatus = currentState.stepStatuses?.[step];
     if (stepStatus === 'completed' || stepStatus === 'skipped') continue;
@@ -2391,10 +2523,9 @@ async function autoOauthLoop() {
       await addLog(`=== [OAuth Mode] Run ${run}/${totalInQueue} for ${acc.email} ===`, 'info');
 
       await executeStepAndWait(1, getAutoStepDelay(1));
-      await executeStepAndWait(6, getAutoStepDelay(6));
-      await executeStepAndWait(7, getAutoStepDelay(7));
-      await executeStepAndWait(8, getAutoStepDelay(8));
-      await executeStepAndWait(9, getAutoStepDelay(9));
+      await executeStep6To9WithStep8Recovery(6, {
+        runLabel: `[OAuth Mode] Run ${run}/${totalInQueue} —`,
+      });
 
       await markAccountOauthCompleted(acc.email);
       
@@ -2884,6 +3015,17 @@ async function pollVerificationCodeWithAutoResend(options) {
 }
 
 async function executeStep4(state) {
+  const preSurface = await detectStep4PreSurface(6000);
+  if (isStep4ProfileSurface(preSurface?.selector || '')) {
+    await addLog('Step 4: Verification skipped by page. Step 5 profile form already detected.', 'warn');
+    await completeStepFromBackground(4, {
+      skippedVerification: true,
+      surface: preSurface.selector,
+      emailTimestamp: Date.now(),
+    });
+    return;
+  }
+
   const mailPollConfig = getMailPollConfig(state);
   const pollPayload = {
     filterAfterTimestamp: state.flowStartTime || 0,
@@ -2922,14 +3064,7 @@ async function executeStep4(state) {
       mail,
       pollPayload,
       successMessage: 'Got verification code',
-      successSelectors: [
-        'input[name="name"]',
-        'input[placeholder*="全名"]',
-        'input[placeholder*="full name" i]',
-        '[role="spinbutton"][data-type="year"]',
-        'input[name="birthday"]',
-        'input[name="age"]',
-      ],
+      successSelectors: STEP4_PROFILE_SELECTORS,
       resendRounds: mailPollConfig.resendRounds,
     });
   } catch (err) {
