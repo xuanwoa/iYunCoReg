@@ -304,35 +304,139 @@ async function deleteGmailItem(row, mailId) {
 }
 
 function findRefreshButton() {
-  const candidates = document.querySelectorAll([
+  const selectors = [
+    'div[gh="tm"] [role="button"][aria-label*="刷新"]',
+    'div[gh="tm"] [role="button"][data-tooltip*="刷新"]',
+    'div[gh="tm"] [role="button"][aria-label*="Refresh"]',
+    'div[gh="tm"] [role="button"][data-tooltip*="Refresh"]',
+    'div[gh="tm"] [role="button"][aria-label*="重新整理"]',
+    'div[gh="tm"] [role="button"][data-tooltip*="重新整理"]',
+    'div[gh="tm"] [act="20"]',
+    '[role="main"] [role="button"][aria-label*="刷新"]',
+    '[role="main"] [role="button"][data-tooltip*="刷新"]',
+    '[role="main"] [role="button"][aria-label*="Refresh"]',
+    '[role="main"] [role="button"][data-tooltip*="Refresh"]',
+    '[role="main"] [act="20"]',
     'div[role="button"][aria-label*="刷新"]',
     'div[role="button"][data-tooltip*="刷新"]',
     'div[role="button"][aria-label*="Refresh"]',
     'div[role="button"][data-tooltip*="Refresh"]',
-    'div[role="button"][aria-label*="重新整理"]',
-    'div[role="button"][data-tooltip*="重新整理"]',
     'div[act="20"]',
-    '.T-I.nu[role="button"]',
-  ].join(', '));
+  ];
 
-  for (const button of candidates) {
-    if (isVisible(button) && button.getAttribute('aria-disabled') !== 'true') {
+  for (const selector of selectors) {
+    const candidates = document.querySelectorAll(selector);
+    for (const button of candidates) {
+      if (!isVisible(button)) continue;
+      if (button.getAttribute('aria-disabled') === 'true') continue;
       return button;
     }
   }
+
   return null;
 }
 
+function getRefreshClickableTarget(button) {
+  if (!button) return null;
+  if (button.matches?.('button, [role="button"], [act="20"]')) return button;
+
+  const parentButton = button.closest?.('button, [role="button"], [act="20"]');
+  if (parentButton) return parentButton;
+
+  const childButton = button.querySelector?.('button, [role="button"], [act="20"]');
+  return childButton || button;
+}
+
+function snapshotInboxState() {
+  const rows = getVisibleMailRows();
+  const ids = rows
+    .slice(0, 12)
+    .map(row => getMailIdFromRow(row))
+    .filter(Boolean)
+    .join('|');
+  const busy = !!document.querySelector('[aria-busy="true"]');
+
+  return { ids, busy, rowCount: rows.length };
+}
+
+function dispatchMouseSequence(target) {
+  const eventTypes = [
+    'pointerover',
+    'mouseover',
+    'pointermove',
+    'mousemove',
+    'pointerdown',
+    'mousedown',
+    'pointerup',
+    'mouseup',
+    'click',
+  ];
+
+  for (const type of eventTypes) {
+    target.dispatchEvent(new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      buttons: type.includes('down') ? 1 : 0,
+    }));
+  }
+}
+
+function robustClickRefreshButton(refreshButton) {
+  const target = getRefreshClickableTarget(refreshButton);
+  if (!target) return false;
+
+  try {
+    target.scrollIntoView({ block: 'center', inline: 'center' });
+  } catch {}
+
+  try {
+    target.focus?.({ preventScroll: true });
+  } catch {}
+
+  dispatchMouseSequence(target);
+
+  try {
+    target.click?.();
+  } catch {}
+
+  return true;
+}
+
 async function refreshInbox() {
-  const refreshButton = findRefreshButton();
-  if (!refreshButton) {
-    log('Gmail: Could not find refresh button. Relying on auto-refresh...', 'warn');
-    return;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    throwIfStopped();
+
+    const refreshButton = findRefreshButton();
+    if (!refreshButton) {
+      log('Gmail: Could not find refresh button. Relying on auto-refresh...', 'warn');
+      return;
+    }
+
+    const before = snapshotInboxState();
+    const clicked = robustClickRefreshButton(refreshButton);
+    if (!clicked) {
+      log('Gmail: Failed to click refresh target.', 'warn');
+      return;
+    }
+
+    log(`Gmail: Refresh click dispatched (attempt ${attempt}/2)`);
+    await sleep(900);
+
+    const after = snapshotInboxState();
+    const changed = after.busy !== before.busy
+      || after.ids !== before.ids
+      || after.rowCount !== before.rowCount;
+
+    if (changed) {
+      log('Gmail: Refresh appears to have taken effect');
+      await sleep(700);
+      return;
+    }
   }
 
-  simulateClick(refreshButton);
-  log('Gmail: Refresh clicked');
-  await sleep(1500);
+  log('Gmail: Refresh may not have taken effect after retries. Continue polling...', 'warn');
+  await sleep(800);
 }
 
 function extractVerificationCode(text) {
