@@ -17,32 +17,6 @@ if (!isTopFrame) {
   console.log(MAIL163_PREFIX, 'Skipping child frame');
 } else {
 
-// Track codes we've already seen — persisted in chrome.storage.session to survive script re-injection
-let seenCodes = new Set();
-
-async function loadSeenCodes() {
-  try {
-    const data = await chrome.storage.session.get('seenCodes');
-    if (data.seenCodes && Array.isArray(data.seenCodes)) {
-      seenCodes = new Set(data.seenCodes);
-      console.log(MAIL163_PREFIX, `Loaded ${seenCodes.size} previously seen codes`);
-    }
-  } catch (err) {
-    console.warn(MAIL163_PREFIX, 'Session storage unavailable, using in-memory seen codes:', err?.message || err);
-  }
-}
-
-// Load previously seen codes on startup
-loadSeenCodes();
-
-async function persistSeenCodes() {
-  try {
-    await chrome.storage.session.set({ seenCodes: [...seenCodes] });
-  } catch (err) {
-    console.warn(MAIL163_PREFIX, 'Could not persist seen codes, continuing in-memory only:', err?.message || err);
-  }
-}
-
 // ============================================================
 // Message Handler (top frame only)
 // ============================================================
@@ -70,7 +44,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // ============================================================
 
 function findMailItems() {
-  return document.querySelectorAll('div[sign="letter"]');
+  const visibleListModules = [...document.querySelectorAll('div[id^="_dvModuleContainer_mbox.ListModule_"]')]
+    .filter(isElementVisible);
+
+  for (const moduleEl of visibleListModules) {
+    const scopedItems = [...moduleEl.querySelectorAll('div[sign="letter"]')]
+      .filter(isElementVisible);
+    if (scopedItems.length > 0) {
+      return scopedItems;
+    }
+  }
+
+  const visibleItems = [...document.querySelectorAll('div[sign="letter"]')]
+    .filter(isElementVisible);
+  if (visibleItems.length > 0) {
+    return visibleItems;
+  }
+
+  return [...document.querySelectorAll('div[sign="letter"]')];
 }
 
 function getCurrentMailIds() {
@@ -118,10 +109,20 @@ function getMailItemMeta(item) {
     titleTexts.join(' '),
   ].join(' '));
 
+  const routingText = normalizeText([
+    ariaLabel,
+    itemText,
+    titleTexts.join(' '),
+  ].join(' '));
+  const hasIncomingHints = /(发件人|代发|\bfrom\b|\bsender\b)/i.test(routingText);
+  const hasOutgoingHints = /(收件人|发送成功|再次编辑发送|\brecipient\b|\bsent\b)/i.test(routingText);
+  const direction = hasOutgoingHints && !hasIncomingHints ? 'outgoing' : 'incoming';
+
   return {
     sender,
     subject,
     combinedText,
+    direction,
   };
 }
 
@@ -150,11 +151,47 @@ function scoreOpenedMailText(text, meta = {}) {
   return score;
 }
 
+function isElementVisible(el) {
+  if (!el || !document.documentElement.contains(el)) return false;
+
+  try {
+    const style = window.getComputedStyle(el);
+    if (!style) return false;
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+      return false;
+    }
+  } catch {}
+
+  const rect = el.getBoundingClientRect?.();
+  if (!rect) return true;
+  return rect.width > 0 && rect.height > 0;
+}
+
+function getReadModuleSubject(moduleEl) {
+  if (!moduleEl) return '';
+
+  const subjectEl = moduleEl.querySelector('h1[id$="_h1Subject"], h1[title="邮件标题"], h1[title="Mail subject"]');
+  return normalizeText(subjectEl?.textContent || '');
+}
+
+function getActiveReadTabTitle() {
+  const activeTab = document.querySelector('.nui-tabs-item-selected[role="tab"], [aria-selected="true"][role="tab"]');
+  if (!activeTab) return '';
+
+  return normalizeText(
+    readAttr(activeTab, 'title') ||
+    activeTab.querySelector('.nui-tabs-item-text')?.textContent ||
+    activeTab.textContent ||
+    ''
+  );
+}
+
 function collectOpenedMailTextCandidates(meta = {}) {
   const candidates = [];
   const seen = new Set();
+  const activeReadTabTitle = getActiveReadTabTitle().toLowerCase();
 
-  function pushCandidate(text, source) {
+  function pushCandidate(text, source, bonus = 0) {
     const normalized = normalizeText(text);
     if (!normalized || normalized.length < 6) return;
     const key = `${source}:${normalized.slice(0, 400)}`;
@@ -163,12 +200,46 @@ function collectOpenedMailTextCandidates(meta = {}) {
     candidates.push({
       source,
       text: normalized,
-      score: scoreOpenedMailText(normalized, meta),
+      score: scoreOpenedMailText(normalized, meta) + bonus,
+    });
+  }
+
+  const readModules = [...document.querySelectorAll('div[id^="_dvModuleContainer_read.ReadModule_"]')];
+  const visibleReadModules = readModules.filter(isElementVisible);
+
+  for (const [index, moduleEl] of visibleReadModules.entries()) {
+    const moduleSubject = getReadModuleSubject(moduleEl);
+    const moduleSubjectLower = moduleSubject.toLowerCase();
+    const tabSubjectBonus = moduleSubjectLower && activeReadTabTitle && moduleSubjectLower === activeReadTabTitle ? 12 : 0;
+    const moduleBonus = 28 + tabSubjectBonus;
+
+    pushCandidate(
+      [
+        moduleSubject,
+        moduleEl.querySelector('ul[id$="_ulFull"]')?.innerText || '',
+        moduleEl.querySelector('div[id$="_dvContent"]')?.innerText || '',
+      ].join(' '),
+      `visible-read-module-${index}`,
+      moduleBonus
+    );
+
+    moduleEl.querySelectorAll('iframe[id$="_frameBody"]').forEach((frame, frameIndex) => {
+      try {
+        const frameBody = frame.contentDocument?.body;
+        if (!frameBody) return;
+        pushCandidate(
+          [moduleSubject, frameBody.innerText || frameBody.textContent || ''].join(' '),
+          `visible-read-frame-${index}-${frameIndex}`,
+          moduleBonus + 24
+        );
+      } catch {}
     });
   }
 
   document.querySelectorAll('div[data-nds-name="main"]').forEach((el, index) => {
-    pushCandidate(el.innerText || el.textContent || '', `nds-main-${index}`);
+    const enclosingVisibleModule = el.closest('div[id^="_dvModuleContainer_read.ReadModule_"]');
+    const bonus = enclosingVisibleModule && isElementVisible(enclosingVisibleModule) ? 18 : 0;
+    pushCandidate(el.innerText || el.textContent || '', `nds-main-${index}`, bonus);
   });
 
   document.querySelectorAll([
@@ -181,7 +252,9 @@ function collectOpenedMailTextCandidates(meta = {}) {
     'div[data-nds-name="main"] div',
     'div[data-nds-name="main"] span',
   ].join(', ')).forEach((el, index) => {
-    pushCandidate(el.innerText || el.textContent || '', `nds-block-${index}`);
+    const enclosingVisibleModule = el.closest('div[id^="_dvModuleContainer_read.ReadModule_"]');
+    const bonus = enclosingVisibleModule && isElementVisible(enclosingVisibleModule) ? 14 : 0;
+    pushCandidate(el.innerText || el.textContent || '', `nds-block-${index}`, bonus);
   });
 
   const detailSelectors = [
@@ -197,7 +270,9 @@ function collectOpenedMailTextCandidates(meta = {}) {
   ];
 
   document.querySelectorAll(detailSelectors.join(', ')).forEach((el, index) => {
-    pushCandidate(el.innerText || el.textContent || '', `detail-${index}`);
+    const enclosingVisibleModule = el.closest('div[id^="_dvModuleContainer_read.ReadModule_"]');
+    const bonus = enclosingVisibleModule && isElementVisible(enclosingVisibleModule) ? 12 : 0;
+    pushCandidate(el.innerText || el.textContent || '', `detail-${index}`, bonus);
   });
 
   document.querySelectorAll('iframe').forEach((frame, index) => {
@@ -205,7 +280,21 @@ function collectOpenedMailTextCandidates(meta = {}) {
       const frameDoc = frame.contentDocument;
       const frameBody = frameDoc?.body;
       if (!frameBody) return;
-      pushCandidate(frameBody.innerText || frameBody.textContent || '', `iframe-${index}`);
+      const readModule = frame.closest('div[id^="_dvModuleContainer_read.ReadModule_"]');
+      const visibleBonus = readModule && isElementVisible(readModule) ? 24 : 0;
+      const frameBodyBonus = /_frameBody$/i.test(frame.id || '') ? 8 : 0;
+      const moduleSubject = getReadModuleSubject(readModule);
+      const tabSubjectBonus =
+        moduleSubject &&
+        activeReadTabTitle &&
+        moduleSubject.toLowerCase() === activeReadTabTitle
+          ? 10
+          : 0;
+      pushCandidate(
+        [moduleSubject, frameBody.innerText || frameBody.textContent || ''].join(' '),
+        `iframe-${index}`,
+        visibleBonus + frameBodyBonus + tabSubjectBonus
+      );
     } catch {}
   });
 
@@ -420,6 +509,10 @@ async function handlePollEmail(step, payload) {
       if (!useFallback && isOldMail) continue;
 
       const meta = getMailItemMeta(item);
+      if (meta.direction === 'outgoing') {
+        continue;
+      }
+
       const combinedLower = meta.combinedText.toLowerCase();
       const senderMatch = senderFilters.some(f => combinedLower.includes(String(f || '').toLowerCase()));
       const subjectMatch = subjectFilters.some(f => combinedLower.includes(String(f || '').toLowerCase()));
@@ -443,8 +536,6 @@ async function handlePollEmail(step, payload) {
           await sleep(1000);
 
           return { ok: true, code, emailTimestamp: Date.now(), mailId: id };
-        } else if (code && seenCodes.has(code)) {
-          log(`Step ${step}: Skipping already-seen code: ${code}`, 'info');
         }
       }
     }
